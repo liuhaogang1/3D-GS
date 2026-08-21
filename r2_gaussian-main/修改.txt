@@ -1,0 +1,350 @@
+R2-Gaussian 平行束 FIPS 数据处理与初始化修改清单
+====================================================
+
+一、当前数据状态
+
+当前数据位于：
+
+FIPS_raw/refcorr/
+    原始 TIFF 投影数据
+
+FIPS_processed/refcorr/
+    MATLAB/HelTomo 处理后的 MAT 投影数据
+
+当前 refcorr 数据配置：
+
+GeometryType=ParallelBeam
+NumberImages=361
+AngleInterval=0.5
+AngleFirst=0
+AngleLast=180
+
+当前已经完成：
+
+1. 原始 TIFF 数据已经经过 fips_process_raw_data.m 处理。
+2. FIPS_processed/refcorr/config.txt 已经存在。
+3. FIPS_processed/refcorr 中有 361 个 MAT 投影文件。
+
+当前还没有完成：
+
+1. 生成 R2-Gaussian 使用的 proj_train 和 proj_test。
+2. 生成 vol_gt.npy 伪真值体数据。
+3. 生成 meta_data.json。
+4. 生成 init_refcorr.npy 初始 Gaussian 点云。
+5. 训练 R2-Gaussian 模型。
+
+
+二、为什么不能直接运行原始脚本
+
+仓库中的 data_generator/real_dataset/generate_data.py 原本是针对 FIPS
+圆锥束案例编写的，而当前 refcorr 是平行束数据。
+
+必须修正以下问题：
+
+1. 原脚本把 scanner 模式硬编码为 cone。
+2. 原脚本对所有数据使用 FDK；平行束应使用 FBP。
+3. 原脚本生成 metadata 时写入 ct 字段，但项目读取的是 vol 字段。
+4. 当前 MAT 投影中存在 Inf 值，必须在生成 NPY 前清理。
+5. 初始化点云使用 ct_utils.py 中的 recon_volume，因此该文件也要支持平行束 FBP。
+
+
+三、备份需要修改的文件
+
+在项目根目录执行：
+
+Copy-Item data_generator\real_dataset\generate_data.py data_generator\real_dataset\generate_data.py.bak
+Copy-Item r2_gaussian\utils\ct_utils.py r2_gaussian\utils\ct_utils.py.bak
+
+
+四、修改 generate_data.py
+
+文件位置：
+
+data_generator\real_dataset\generate_data.py
+
+修改 1：增加几何模式变量
+------------------------
+
+找到：
+
+object_scale = args.object_scale
+
+# Read configuration
+config_file_path = osp.join(input_data_path, "config.txt")
+
+替换为：
+
+object_scale = args.object_scale
+geometry_type = "ConeBeam"
+
+# Read configuration
+config_file_path = osp.join(input_data_path, "config.txt")
+
+
+修改 2：从 config.txt 读取 GeometryType
+---------------------------------------
+
+找到：
+
+for config_line in f.readlines():
+    if "NumberImages" in config_line:
+
+替换为：
+
+for config_line in f.readlines():
+    if "GeometryType" in config_line:
+        geometry_type = config_line.split("=")[-1].strip()
+    elif "NumberImages" in config_line:
+
+这样当前的：
+
+GeometryType=ParallelBeam
+
+会被识别为平行束。
+
+
+修改 3：清理 MAT 投影中的 Inf 和 NaN
+------------------------------------
+
+找到原来的三行：
+
+proj = scipy.io.loadmat(proj_mat_path)["img"] / proj_rescale * object_scale
+proj = proj.astype(np.float32)
+proj[proj < 0] = 0
+
+完整替换为：
+
+proj = scipy.io.loadmat(proj_mat_path)["img"].astype(np.float32)
+
+# Remove invalid values generated during raw-data preprocessing.
+valid = np.isfinite(proj)
+if not valid.any():
+    raise ValueError(f"No finite pixel exists in {proj_mat_path}")
+
+# Clip positive Inf to the 99.9 percentile of finite pixels.
+cap = np.percentile(proj[valid], 99.9)
+proj = np.nan_to_num(
+    proj,
+    nan=0.0,
+    posinf=cap,
+    neginf=0.0,
+)
+
+proj = proj / proj_rescale * object_scale
+proj[proj < 0] = 0
+
+这一步必须执行，否则生成的 vol_gt.npy 可能包含 Inf 或 NaN。
+
+
+修改 4：让 scanner 模式自动使用 parallel
+--------------------------------------------
+
+找到：
+
+scanner_cfg = {
+    "mode": "cone",
+
+替换为：
+
+scanner_cfg = {
+    "mode": "parallel" if geometry_type == "ParallelBeam" else "cone",
+
+当前 refcorr 数据最终应生成：
+
+"mode": "parallel"
+
+
+修改 5：平行束使用 FBP，圆锥束使用 FDK
+----------------------------------------
+
+找到：
+
+ct_gt = algs.fdk(projs[:, ::-1, :], geo, angles[::skip])
+
+替换为：
+
+if scanner_cfg["mode"] == "parallel":
+    ct_gt = algs.fbp(projs[:, ::-1, :], geo, angles[::skip])
+else:
+    ct_gt = algs.fdk(projs[:, ::-1, :], geo, angles[::skip])
+
+
+修改 6：修正体数据字段名
+------------------------
+
+找到：
+
+"ct": "vol_gt.npy",
+
+替换为：
+
+"vol": "vol_gt.npy",
+
+项目的 dataset_reader.py 使用 meta_data["vol"] 读取体数据。
+
+
+五、修改 ct_utils.py
+
+文件位置：
+
+r2_gaussian\utils\ct_utils.py
+
+找到：
+
+if recon_method == "fdk":
+    vol = algs.fdk(projs[:, ::-1, :], geo, angles)
+elif recon_method == "cgls":
+
+替换为：
+
+if recon_method == "fdk":
+    # TIGRE uses FBP for parallel-beam geometry.
+    if geo.mode == "parallel":
+        vol = algs.fbp(projs[:, ::-1, :], geo, angles)
+    else:
+        vol = algs.fdk(projs[:, ::-1, :], geo, angles)
+elif recon_method == "cgls":
+
+虽然命令仍然写 --recon_method fdk，但当 geo.mode 是 parallel 时，
+代码会自动内部使用 FBP。
+
+
+六、检查 Python 语法
+
+使用项目环境中的 Python：
+
+$py = "D:\CondaData\envs\r2_gaussian\python.exe"
+
+& $py -m py_compile `
+  data_generator\real_dataset\generate_data.py `
+  r2_gaussian\utils\ct_utils.py
+
+如果没有输出，表示语法检查通过。
+
+
+七、生成标准 R2-Gaussian 数据
+
+当前只有 refcorr 一个 case，因此直接运行 generate_data.py，不运行
+generate_data_all.py。
+
+$py = "D:\CondaData\envs\r2_gaussian\python.exe"
+
+& $py data_generator\real_dataset\generate_data.py `
+  --data data_generator\real_dataset\FIPS_processed\refcorr `
+  --output data\real_dataset\parallel_ntrain_75_angle_180\refcorr `
+  --n_train 75 `
+  --n_test 100 `
+  --proj_subsample 4 `
+  --proj_rescale 400 `
+  --object_scale 50 `
+  --nVoxel 256 256 256 `
+  --sVoxel 2 2 2 `
+  --offOrigin 0 0 0 `
+  --offDetector 0 0 `
+  --accuracy 0.5
+
+生成成功后，目录应为：
+
+data\real_dataset\parallel_ntrain_75_angle_180\refcorr\
+    meta_data.json
+    vol_gt.npy
+    proj_all\
+    proj_train\
+    proj_test\
+
+
+八、检查生成结果
+
+$py = "D:\CondaData\envs\r2_gaussian\python.exe"
+
+& $py -c "import json,numpy as np; p=r'data\real_dataset\parallel_ntrain_75_angle_180\refcorr'; m=json.load(open(p+r'\meta_data.json')); v=np.load(p+r'\vol_gt.npy'); print('mode:',m['scanner']['mode']); print('volume:',v.shape); print('finite:',np.isfinite(v).all()); print('train:',len(m['proj_train'])); print('test:',len(m['proj_test'])); assert m['scanner']['mode']=='parallel'; assert 'vol' in m; assert np.isfinite(v).all()"
+
+预期结果：
+
+mode: parallel
+volume: (256, 256, 256)
+finite: True
+train: 75
+test: 100
+
+
+九、生成初始 Gaussian 点云
+
+不要优先运行 initialize_pcd_all.py，因为该脚本内部使用 Linux 风格的
+CUDA_VISIBLE_DEVICES=0 python 命令，在 Windows 下可能失败。
+
+直接运行单个 case：
+
+$py = "D:\CondaData\envs\r2_gaussian\python.exe"
+$dataset = "data\real_dataset\parallel_ntrain_75_angle_180\refcorr"
+
+& $py initialize_pcd.py `
+  --data $dataset `
+  --output "$dataset\init_refcorr.npy" `
+  --recon_method fdk `
+  --n_points 50000 `
+  --density_thresh 0.05 `
+  --density_rescale 0.15
+
+这里虽然命令写的是 fdk，但修改过 ct_utils.py 后，平行束会自动调用
+FBP。
+
+成功后应存在：
+
+data\real_dataset\parallel_ntrain_75_angle_180\refcorr\init_refcorr.npy
+
+检查点云：
+
+& $py -c "import numpy as np; p=r'data\real_dataset\parallel_ntrain_75_angle_180\refcorr\init_refcorr.npy'; x=np.load(p); print(x.shape); print(x[:2]); assert x.shape[1]==4"
+
+预期形状：
+
+(50000, 4)
+
+四列分别是：
+
+x, y, z, density
+
+
+十、开始训练
+
+$py = "D:\CondaData\envs\r2_gaussian\python.exe"
+$dataset = "data\real_dataset\parallel_ntrain_75_angle_180\refcorr"
+
+& $py train.py `
+  -s $dataset `
+  -m output\refcorr_parallel_75 `
+  --eval
+
+
+十一、测试训练结果
+
+& $py test.py `
+  -m output\refcorr_parallel_75 `
+  -s $dataset `
+  --iteration -1
+
+
+十二、最终检查清单
+
+[ ] 已备份 generate_data.py 和 ct_utils.py。
+[ ] generate_data.py 能读取 GeometryType=ParallelBeam。
+[ ] generate_data.py 清理 NaN/Inf。
+[ ] scanner_cfg["mode"] 为 parallel。
+[ ] 平行束重建使用 algs.fbp。
+[ ] metadata 使用 "vol": "vol_gt.npy"。
+[ ] py_compile 语法检查通过。
+[ ] meta_data.json 已生成。
+[ ] vol_gt.npy 存在且全部为有限值。
+[ ] proj_train 和 proj_test 已生成。
+[ ] init_refcorr.npy 已生成，形状为 (50000, 4)。
+[ ] 然后再运行 train.py。
+
+
+十三、重要提醒
+
+1. 不要把当前 refcorr 平行束数据标记为 cone。
+2. 不要直接使用原始的 generate_data.py。
+3. 不要在生成 vol_gt.npy 之前忽略 Inf 问题。
+4. 作者发布的圆锥束模型不一定适用于当前 refcorr 平行束数据。
+5. 当前数据应先完成自己的初始化和训练，再使用 test.py。
