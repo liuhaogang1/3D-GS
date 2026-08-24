@@ -107,6 +107,7 @@
 作用：
     初始化点云时同步切换fbp和fdk
     命令中保持--recon_method fdk但实际代码会对平行束和锥束采用不同算法
+    
 -----------------------------------------------------------------------------------------
 7.新增prepare_refcorr_r2.py和init_from_sart.py两文件
 
@@ -130,3 +131,36 @@ init_from_sart.py作用：
     将体素密度乘以 0.15；
     生成init_refcorr_sart128.npy作为初始点云
 -----------------------------------------------------------------------------------------
+
+#########################################################################################
+# 2026.8.24 修改
+
+新增prepare_fbp_tiff.py init_from_fbp.py文件
+
+prepare_fbp_tiff.py 作用：
+    361 张 TIFF
+    → 删除 180° 重复端点
+    → 360 个角度
+    → 降采样/裁剪
+    → 并行束 FBP
+    → vol_fbp.npy
+
+python prepare_fbp_tiff.py \
+  --input_dir data_generator/real_dataset/FIPS_raw/refcorr \
+  --output_dir data/real_dataset/parallel_fbp_refcorr \
+  --pixel_subsample 4 \
+  --projection_scale 0.125 \
+  --n_train 50 \
+  --n_test 100 \
+  --nVoxel 128 128 128 \
+  --sVoxel 2 2 2 \
+  --DSD 7 \
+  --DSO 5 \
+  --pixel_size 0.02
+
+python init_from_fbp.py \
+  --volume data/real_dataset/parallel_fbp_refcorr/vol_fbp.npy \
+  --output data/real_dataset/parallel_fbp_refcorr/init_fbp.npy \
+  --n_points 50000 \
+  --density_thresh 0.05 \
+  --density_rescale 0.15
