@@ -7,6 +7,7 @@ import argparse
 import os.path as osp
 import json
 import pickle
+from pathlib import Path
 from tqdm import trange
 import copy
 import torch
@@ -25,7 +26,8 @@ np.random.seed(0)
 
 class InitParams(ParamGroup):
     def __init__(self, parser):
-        self.recon_method = "fdk"
+        self.recon_method = "fbp"
+        self.recon_split = "all"
         self.n_points = 50000
         self.density_thresh = 0.05
         self.density_rescale = 0.15
@@ -44,7 +46,7 @@ def init_pcd(
     "Initialize Gaussians."
     recon_method = args.recon_method
     n_points = args.n_points
-    assert recon_method in ["random", "fdk"], "--recon_method not supported."
+    assert recon_method in ["random", "fbp", "fdk"], "--recon_method not supported."
     if recon_method == "random":
         print(f"Initialize random point clouds.")
         sampled_positions = np.array(scanner_cfg["offOrigin"])[None, ...] + np.array(
@@ -98,10 +100,35 @@ def main(
     model_args.source_path = data_path
     scene = Scene(model_args, False)  #! Here we scale the scene to [-1,1]^3 space.
     train_cameras = scene.getTrainCameras()
-    projs_train = np.concatenate(
-        [t2a(cam.original_image) for cam in train_cameras], axis=0
-    )
-    angles_train = np.stack([t2a(cam.angle) for cam in train_cameras], axis=0)
+    if init_args.recon_split == "all":
+        full_projection_path = Path(data_path) / "proj_all.npy"
+        metadata_path = Path(data_path) / "meta_data.json"
+        if full_projection_path.exists() and metadata_path.exists():
+            with metadata_path.open("r", encoding="utf-8") as handle:
+                metadata = json.load(handle)
+            angles_all = metadata.get("source", {}).get("angles_all")
+            if angles_all is None:
+                raise ValueError(
+                    "meta_data.json has no source.angles_all for --recon_split all"
+                )
+            projs_train = np.load(full_projection_path).astype(np.float32)
+            angles_train = np.asarray(angles_all, dtype=np.float32)
+            if len(projs_train) != len(angles_train):
+                raise ValueError("proj_all.npy and source.angles_all have different lengths")
+            # Scene scales detector values together with the scanner geometry.
+            projs_train *= scene.scene_scale
+            print(f"FBP initialization uses all {len(angles_train)} views")
+        else:
+            print("proj_all.npy not found; falling back to training views")
+            projs_train = np.concatenate(
+                [t2a(cam.original_image) for cam in train_cameras], axis=0
+            )
+            angles_train = np.stack([t2a(cam.angle) for cam in train_cameras], axis=0)
+    else:
+        projs_train = np.concatenate(
+            [t2a(cam.original_image) for cam in train_cameras], axis=0
+        )
+        angles_train = np.stack([t2a(cam.angle) for cam in train_cameras], axis=0)
     scanner_cfg = scene.scanner_cfg
     geo = get_geometry_tigre(scanner_cfg)
 

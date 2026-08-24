@@ -16,12 +16,12 @@ from r2_gaussian.utils.image_utils import metric_vol
 
 def recon_volume(projs, angles, geo, recon_method):
     """Reconstruct ct with traditional methods."""
-    if recon_method == "fdk":
-    # TIGRE uses FBP for parallel-beam geometry.
+    if recon_method in {"fdk", "fbp"}:
+        # TIGRE uses FBP for parallel-beam geometry and FDK for cone-beam.
         if geo.mode == "parallel":
             vol = algs.fbp(projs[:, ::-1, :], geo, angles)
         else:
-         vol = algs.fdk(projs[:, ::-1, :], geo, angles)
+            vol = algs.fdk(projs[:, ::-1, :], geo, angles)
     elif recon_method == "cgls":
         vol, _ = algs.cgls(projs[:, ::-1, :], geo, angles, 60, computel2=True)
     else:
@@ -68,8 +68,11 @@ def run_ct_recon_algs(projs, angles, geo, ct_gt, save_path, method):
     os.makedirs(slice_save_path, exist_ok=True)
     start_time = time.time()
 
-    if method == "fdk":
-        ct_pred = algs.fdk(projs[:, ::-1, :], geo, angles)
+    if method in {"fdk", "fbp"}:
+        if geo.mode == "parallel":
+            ct_pred = algs.fbp(projs[:, ::-1, :], geo, angles)
+        else:
+            ct_pred = algs.fdk(projs[:, ::-1, :], geo, angles)
     elif method == "sart":
         lmbda = 1
         lambdared = 0.999

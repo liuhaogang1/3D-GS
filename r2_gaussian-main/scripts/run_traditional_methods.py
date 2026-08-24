@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import tigre
 import yaml
 import copy
+import json
 
 sys.path.append("./")
 from r2_gaussian.dataset import Scene
@@ -26,14 +27,25 @@ def main(dataset: ModelParams):
     geo = get_geometry_tigre(scanner_cfg)
 
     projs_train = np.concatenate(
-        [t2a(c.original_image) for c in scene.getTrainCameras()],
-        axis=0,
+        [t2a(c.original_image) for c in scene.getTrainCameras()], axis=0
     )
+    train_angles = np.stack([c.angle for c in scene.getTrainCameras()], axis=0)
+    full_projection_path = osp.join(dataset.source_path, "proj_all.npy")
+    metadata_path = osp.join(dataset.source_path, "meta_data.json")
+    if osp.exists(full_projection_path) and osp.exists(metadata_path):
+        with open(metadata_path, "r", encoding="utf-8") as handle:
+            metadata = json.load(handle)
+        angles_all = metadata.get("source", {}).get("angles_all")
+        if angles_all is not None:
+            projs_train = np.load(full_projection_path).astype(np.float32)
+            projs_train *= scene.scene_scale
+            train_angles = np.asarray(angles_all, dtype=np.float32)
+            print(f"Traditional reconstruction uses all {len(train_angles)} views")
+
     projs_test = np.concatenate(
         [t2a(c.original_image) for c in scene.getTestCameras()],
         axis=0,
     )
-    train_angles = np.stack([c.angle for c in scene.getTrainCameras()], axis=0)
     test_angles = np.stack([c.angle for c in scene.getTestCameras()], axis=0)
 
     vol_gt = t2a(scene.vol_gt)
@@ -44,7 +56,7 @@ def main(dataset: ModelParams):
     data_name = osp.basename(dataset.source_path)
 
     print("Run traditional algorithms on {}".format(data_name))
-    methods = ["fdk", "sart", "asd_pocs"]
+    methods = ["fbp", "sart", "asd_pocs"]
     for method in methods:
         out_dict[method], ct_pred, _ = run_ct_recon_algs(
             projs_train, train_angles, copy.deepcopy(geo), vol_gt, save_path, method

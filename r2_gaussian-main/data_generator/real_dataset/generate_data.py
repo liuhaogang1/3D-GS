@@ -52,6 +52,14 @@ def main(args):
     angles = np.concatenate(
         [np.arange(angle_start, angle_last, angle_interval), [angle_last]]
     )
+    if (
+        geometry_type == "ParallelBeam"
+        and len(angles) > 1
+        and np.isclose(angles[-1] - angles[0], 180.0, atol=1e-4)
+    ):
+        # For parallel beam, the 180-degree endpoint duplicates the 0-degree view.
+        angles = angles[:-1]
+        n_proj = len(angles)
     angles = angles / 180.0 * np.pi
 
     # Read and save projections
@@ -63,6 +71,9 @@ def main(args):
     os.makedirs(train_save_path, exist_ok=True)
     os.makedirs(test_save_path, exist_ok=True)
     proj_mat_paths = sorted(glob.glob(osp.join(input_data_path, "*.mat")))
+    if len(proj_mat_paths) < n_proj:
+        raise ValueError(f"Expected at least {n_proj} MAT projections, found {len(proj_mat_paths)}")
+    proj_mat_paths = proj_mat_paths[:n_proj]
     projection_train_list = []
     projection_test_list = []
     train_ids = np.linspace(0, n_proj - 1, args.n_train).astype(int)
@@ -135,6 +146,9 @@ def main(args):
 
     # Scanner config
     proj = np.load(osp.join(output_path, projection_train_list[0]["file_path"]))
+    all_proj_paths = sorted(glob.glob(osp.join(all_save_path, "*.npy")))
+    all_projs = np.stack([np.load(path) for path in all_proj_paths], axis=0)
+    np.save(osp.join(output_path, "proj_all.npy"), all_projs)
     nDetector = [proj.shape[0], proj.shape[1]]
     sDetector = np.array(nDetector) * np.array(dDetector)
     nVoxel = args.nVoxel
@@ -160,7 +174,7 @@ def main(args):
         "totalAngle": angle_last - angle_start,
         "startAngle": angle_start,
         "noise": True,
-        "filter": None,
+        "filter": args.filter,
     }
 
     # Reconstruct with FDK as gt
@@ -192,6 +206,12 @@ def main(args):
         "bbox": bbox,
         "proj_train": projection_train_list,
         "proj_test": projection_test_list,
+        "source": {
+            "algorithm": "TIGRE parallel-beam FBP" if scanner_cfg["mode"] == "parallel" else "TIGRE FDK",
+            "n_views": len(angles),
+            "angles_all": [float(angle) for angle in angles],
+            "removed_duplicate_endpoint": geometry_type == "ParallelBeam",
+        },
     }
     with open(osp.join(output_path, "meta_data.json"), "w", encoding="utf-8") as f:
         json.dump(meta_data, f, indent=4)
@@ -215,6 +235,12 @@ if __name__ == "__main__":
     parser.add_argument("--offOrigin", nargs="+", default=[0.0, 0.0, 0.0], type=float, help="offOrigin")
     parser.add_argument("--offDetector", nargs="+", default=[0.0, 0.0], type=float, help="offDetector")
     parser.add_argument("--accuracy", default=0.5, type=float, help="accuracy")
+    parser.add_argument(
+        "--filter",
+        default="hann",
+        choices=["ram_lak", "shepp_logan", "cosine", "hamming", "hann"],
+        help="FBP filter; Hann is less sensitive to noisy/invalid detector pixels",
+    )
     
     
     args = parser.parse_args()
