@@ -9,7 +9,12 @@ import numpy as np
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--volume", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Output point cloud. Defaults to <volume_dir>/init_<volume_dir_name>.npy.",
+    )
     parser.add_argument("--n_points", type=int, default=50000)
     parser.add_argument("--density_thresh", type=float, default=0.05)
     parser.add_argument("--density_rescale", type=float, default=0.15)
@@ -53,9 +58,17 @@ def main():
     densities = volume[tuple(selected.T)] * args.density_rescale
     point_cloud = np.concatenate([positions, densities[:, None]], axis=1).astype(np.float32)
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    np.save(args.output, point_cloud)
-    print(f"Saved {point_cloud.shape[0]} points to {args.output}")
+    canonical_output = args.volume.parent / f"init_{args.volume.parent.name}.npy"
+    output = args.output if args.output is not None else canonical_output
+    output.parent.mkdir(parents=True, exist_ok=True)
+    np.save(output, point_cloud)
+    print(f"Saved {point_cloud.shape[0]} points to {output}")
+
+    # initialize_gaussian() looks for init_<dataset_name>.npy when --ply_path
+    # is omitted. Keep that convention even when a custom output name is used.
+    if output.resolve() != canonical_output.resolve():
+        np.save(canonical_output, point_cloud)
+        print(f"Saved canonical initialization to {canonical_output}")
     print(f"density range: {densities.min():.6g} ~ {densities.max():.6g}")
 
 
