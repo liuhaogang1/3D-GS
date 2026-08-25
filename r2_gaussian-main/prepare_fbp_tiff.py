@@ -126,6 +126,7 @@ def process_projection(image, args):
 
 def build_parallel_geometry(args, detector_shape):
     height, width = detector_shape
+    effective_pixel_size = args.pixel_size * args.pixel_subsample
     geo = tigre.geometry(
         mode="parallel", nVoxel=np.asarray(args.nVoxel[::-1], dtype=np.int32)
     )
@@ -133,7 +134,8 @@ def build_parallel_geometry(args, detector_shape):
     geo.DSO = float(args.DSO)
     geo.nDetector = np.asarray([height, width], dtype=np.int32)
     geo.sDetector = np.asarray(
-        [height * args.pixel_size, width * args.pixel_size], dtype=np.float32
+        [height * effective_pixel_size, width * effective_pixel_size],
+        dtype=np.float32,
     )
     geo.dDetector = geo.sDetector / geo.nDetector
     geo.nVoxel = np.asarray(args.nVoxel[::-1], dtype=np.int32)
@@ -177,14 +179,10 @@ def main(args):
     if not paths:
         raise ValueError(f"No TIFF files found in {args.input_dir}")
 
-    projections = np.stack(
+    projections_all = np.stack(
         [process_projection(tifffile.imread(path), args) for path in paths], axis=0
     )
-    angles = build_angles(args, len(projections))
-    if len(angles) != len(projections):
-        projections = projections[: len(angles)]
-    if len(angles) < 2:
-        raise ValueError("At least two projection angles are required")
+    angles = build_angles(args, len(projections_all))
     config_values = parse_config(args.config)
     angle_interval = float(config_values.get("AngleInterval", args.angle_interval))
     removed_endpoint = (
@@ -192,6 +190,10 @@ def main(args):
         and len(paths) == len(angles) + 1
         and np.isclose(angle_interval * len(angles), 180.0, atol=1e-3)
     )
+    endpoint_pair = projections_all[[0, -1]].copy() if removed_endpoint else None
+    projections = projections_all[: len(angles)]
+    if len(angles) < 2:
+        raise ValueError("At least two projection angles are required")
     total_angle = angle_interval * len(angles) if removed_endpoint else float(
         np.rad2deg(angles[-1] - angles[0])
     )
@@ -199,6 +201,8 @@ def main(args):
     output = args.output_dir
     output.mkdir(parents=True, exist_ok=True)
     np.save(output / "proj_all.npy", projections)
+    if endpoint_pair is not None:
+        np.save(output / "proj_endpoint_pair.npy", endpoint_pair)
 
     geo = build_parallel_geometry(args, projections.shape[1:])
     volume_tigre = algs.fbp(projections[:, ::-1, :], geo, angles)
@@ -227,8 +231,8 @@ def main(args):
         "DSO": float(args.DSO),
         "nDetector": [int(x) for x in projections.shape[1:]],
         "sDetector": [
-            float(projections.shape[1] * args.pixel_size),
-            float(projections.shape[2] * args.pixel_size),
+            float(projections.shape[1] * args.pixel_size * args.pixel_subsample),
+            float(projections.shape[2] * args.pixel_size * args.pixel_subsample),
         ],
         "nVoxel": [int(x) for x in args.nVoxel],
         "sVoxel": [float(x) for x in args.sVoxel],
@@ -262,7 +266,10 @@ def main(args):
             "zero_policy": args.zero_policy,
             "shift_v": int(args.shift_v),
             "pixel_subsample": int(args.pixel_subsample),
+            "input_pixel_size": float(args.pixel_size),
+            "effective_pixel_size": float(args.pixel_size * args.pixel_subsample),
             "projection_scale": float(args.projection_scale),
+            "endpoint_pair": "proj_endpoint_pair.npy" if endpoint_pair is not None else None,
         },
     }
     with (output / "meta_data.json").open("w", encoding="utf-8") as handle:
