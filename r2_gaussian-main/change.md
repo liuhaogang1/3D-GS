@@ -390,3 +390,555 @@ python init_from_fbp.py \
     git push origin HEAD
 
 说明：data/real_dataset/parallel_fbp_refcorr_v2 位于 .gitignore 中，不会被提交。
+
+#########################################################################################
+# 2026.8.24 代码变更前后对比记录
+
+说明：本节以提交 2b27025 作为“原代码”基线，以提交 8983f8d 作为“修改后代码”。
+只列出与 FBP 效果、投影角度、初始化和旋转中心直接相关的代码片段。
+
+一、prepare_fbp_tiff.py
+-----------------------
+
+修改位置：process_projection()
+修改目的：原代码只是清理 NaN/Inf，默认没有把 TIFF 强度转换为 FBP 所需的线积分。
+
+原代码：
+
+```python
+def process_projection(image, pixel_subsample):
+    image = np.asarray(image, dtype=np.float32)
+    finite = np.isfinite(image)
+    if not finite.any():
+        raise ValueError("A TIFF projection contains no finite pixels")
+    cap = np.percentile(image[finite], 99.9)
+    image = np.nan_to_num(image, nan=0.0, posinf=cap, neginf=0.0)
+    if pixel_subsample != 1:
+        h, w = image.shape
+        new_h = max(1, h // pixel_subsample)
+        new_w = max(1, w // pixel_subsample)
+        image = zoom(image, (new_h / h, new_w / w), order=1)
+    return image.astype(np.float32)
+```
+
+修改后代码：
+
+```python
+def fill_nearest(image, bad):
+    if not bad.any():
+        return image
+    good = ~bad
+    if not good.any():
+        raise ValueError("A projection contains no valid pixels")
+    _, indices = distance_transform_edt(
+        bad, return_distances=True, return_indices=True
+    )
+    image[bad] = image[tuple(indices[:, bad])]
+    return image
+
+
+def process_projection(image, args):
+    image = np.asarray(image, dtype=np.float32)
+    finite = np.isfinite(image)
+    if not finite.any():
+        raise ValueError("A TIFF projection contains no finite pixels")
+
+    cap = float(np.percentile(image[finite], args.clip_percentile))
+    image = np.nan_to_num(image, nan=0.0, posinf=cap, neginf=0.0)
+
+    if args.input_type in {"transmission", "intensity"}:
+        bad = image <= 0
+        if args.zero_policy == "nearest":
+            image = fill_nearest(image, bad)
+        elif args.zero_policy == "clip":
+            positive = image[image > 0]
+            if positive.size == 0:
+                raise ValueError("A projection contains no positive intensity")
+            image = np.maximum(image, np.percentile(positive, 0.1))
+
+        image = np.maximum(image, args.log_eps)
+        i0 = args.i0 if args.i0 > 0 else np.percentile(
+            image[image > 0], args.i0_percentile
+        )
+        image = -np.log(image / i0)
+        image = np.maximum(image, 0.0)
+    else:
+        image = np.maximum(image, 0.0)
+
+    if args.shift_v != 0:
+        shifted = np.zeros_like(image)
+        if args.shift_v > 0:
+            shifted[:-args.shift_v] = image[args.shift_v:]
+        else:
+            shift = -args.shift_v
+            shifted[shift:] = image[:-shift]
+        image = shifted
+
+    if args.pixel_subsample != 1:
+        height, width = image.shape
+        new_height = max(1, height // args.pixel_subsample)
+        new_width = max(1, width // args.pixel_subsample)
+        image = zoom(
+            image,
+            (new_height / height, new_width / width),
+            order=args.resize_order,
+        )
+        if image.shape[0] > image.shape[1]:
+            offset = (image.shape[0] - image.shape[1]) // 2
+            image = image[offset : image.shape[0] - offset]
+        elif image.shape[1] > image.shape[0]:
+            offset = (image.shape[1] - image.shape[0]) // 2
+            image = image[:, offset : image.shape[1] - offset]
+
+    image *= np.float32(args.projection_scale)
+    if not np.isfinite(image).all():
+        raise ValueError("Processed projection contains NaN or Inf")
+    return image.astype(np.float32)
+```
+
+修改结果：
+
+    TIFF强度 -> 无效值处理 -> -log(I/I0) -> 5像素位移
+              -> 降采样/裁剪 -> 投影缩放 -> FBP输入
+
+注意：如果输入已经是线积分，不能再次执行 -log，应使用：
+
+```powershell
+--input_type line_integral
+```
+
+二、prepare_fbp_tiff.py 的 FBP 几何和输出
+------------------------------------------
+
+修改位置：build_parallel_geometry() 和 main()
+
+原代码：
+
+```python
+geo.accuracy = float(args.accuracy)
+geo.filter = None
+
+projections *= np.float32(args.projection_scale)
+if args.log_projection:
+    projections = np.clip(projections, args.log_eps, None)
+    projections = -np.log(projections)
+
+volume_tigre = algs.fbp(projections[:, ::-1, :], geo, angles)
+volume = np.transpose(volume_tigre, (2, 1, 0)).astype(np.float32)
+volume = np.nan_to_num(volume, nan=0.0, posinf=0.0, neginf=0.0)
+volume = np.clip(volume, 0.0, None)
+np.save(output / "vol_fbp.npy", volume)
+```
+
+修改后代码：
+
+```python
+geo.accuracy = float(args.accuracy)
+geo.filter = args.filter
+
+volume_tigre = algs.fbp(projections[:, ::-1, :], geo, angles)
+volume_raw = np.transpose(volume_tigre, (2, 1, 0)).astype(np.float32)
+volume_raw = np.nan_to_num(
+    volume_raw, nan=0.0, posinf=0.0, neginf=0.0
+)
+volume = np.clip(volume_raw, 0.0, None)
+np.save(output / "vol_fbp_raw.npy", volume_raw)
+np.save(output / "vol_fbp.npy", volume)
+```
+
+修改原因：
+
+1. 原代码默认 `geo.filter = None`，TIGRE实际使用 Ram-Lak；对噪声和坏点比较敏感。
+2. 修改后默认使用 `hann`，同时保留 `vol_fbp_raw.npy`，便于区分滤波伪影和非负裁剪影响。
+3. `-log(I/I0)` 移入单帧投影预处理，避免先缩放强度再错误地对投影执行对数变换。
+
+滤波器参数定义：
+
+```python
+parser.add_argument(
+    "--filter",
+    choices=["ram_lak", "shepp_logan", "cosine", "hamming", "hann"],
+    default="hann",
+)
+```
+
+三、prepare_fbp_tiff.py 的角度端点和元数据
+--------------------------------------------
+
+原代码虽然删除了最后一张重复投影，但元数据只使用：
+
+```python
+"totalAngle": float(np.rad2deg(angles[-1] - angles[0])),
+```
+
+这会把 `0°...179.5°` 的离散数组写成约 `179.5°`，容易误解实际扫描覆盖范围。
+
+修改后代码：
+
+```python
+config_values = parse_config(args.config)
+angle_interval = float(
+    config_values.get("AngleInterval", args.angle_interval)
+)
+removed_endpoint = bool(
+    not args.keep_duplicate_endpoint
+    and len(paths) == len(angles) + 1
+    and np.isclose(angle_interval * len(angles), 180.0, atol=1e-3)
+)
+total_angle = (
+    angle_interval * len(angles)
+    if removed_endpoint
+    else float(np.rad2deg(angles[-1] - angles[0]))
+)
+```
+
+并在 `meta_data.json` 中保存：
+
+```python
+"totalAngle": float(total_angle),
+"source": {
+    "n_views": len(angles),
+    "angles_all": [float(angle) for angle in angles],
+    "removed_duplicate_endpoint": bool(removed_endpoint),
+    "input_type": args.input_type,
+    "shift_v": int(args.shift_v),
+    "pixel_subsample": int(args.pixel_subsample),
+    "projection_scale": float(args.projection_scale),
+},
+```
+
+对 refcorr 数据的结果：
+
+    原始 TIFF：361张
+    删除180°重复端点后：360张
+    角度：0°到179.5°，间隔0.5°
+    扫描覆盖：180°平行束完整数据
+
+四、initialize_pcd.py
+---------------------
+
+修改位置：InitParams 和 main()
+修改目的：原代码从 Scene 中读取训练相机，因此 FBP 初始化可能只用50/75张稀疏视角。
+
+原代码：
+
+```python
+class InitParams(ParamGroup):
+    def __init__(self, parser):
+        self.recon_method = "fdk"
+        self.n_points = 50000
+        self.density_thresh = 0.05
+        self.density_rescale = 0.15
+
+...
+
+train_cameras = scene.getTrainCameras()
+projs_train = np.concatenate(
+    [t2a(cam.original_image) for cam in train_cameras], axis=0
+)
+angles_train = np.stack([t2a(cam.angle) for cam in train_cameras], axis=0)
+```
+
+修改后代码：
+
+```python
+class InitParams(ParamGroup):
+    def __init__(self, parser):
+        self.recon_method = "fbp"
+        self.recon_split = "all"
+        self.n_points = 50000
+        self.density_thresh = 0.05
+        self.density_rescale = 0.15
+
+...
+
+train_cameras = scene.getTrainCameras()
+if init_args.recon_split == "all":
+    full_projection_path = Path(data_path) / "proj_all.npy"
+    metadata_path = Path(data_path) / "meta_data.json"
+    if full_projection_path.exists() and metadata_path.exists():
+        with metadata_path.open("r", encoding="utf-8") as handle:
+            metadata = json.load(handle)
+        angles_all = metadata.get("source", {}).get("angles_all")
+        if angles_all is None:
+            raise ValueError(
+                "meta_data.json has no source.angles_all for --recon_split all"
+            )
+        projs_train = np.load(full_projection_path).astype(np.float32)
+        angles_train = np.asarray(angles_all, dtype=np.float32)
+        if len(projs_train) != len(angles_train):
+            raise ValueError(
+                "proj_all.npy and source.angles_all have different lengths"
+            )
+        projs_train *= scene.scene_scale
+        print(f"FBP initialization uses all {len(angles_train)} views")
+    else:
+        print("proj_all.npy not found; falling back to training views")
+        projs_train = np.concatenate(
+            [t2a(cam.original_image) for cam in train_cameras], axis=0
+        )
+        angles_train = np.stack(
+            [t2a(cam.angle) for cam in train_cameras], axis=0
+        )
+```
+
+修改结果：
+
+    默认：使用 proj_all.npy + source.angles_all
+    备用：没有全角度文件时，回退到训练视角
+    可选：--recon_split train 强制使用训练视角
+
+五、r2_gaussian/utils/ct_utils.py
+---------------------------------
+
+修改位置：recon_volume() 和 run_ct_recon_algs()
+
+原代码：
+
+```python
+if recon_method == "fdk":
+    # TIGRE uses FBP for parallel-beam geometry.
+    if geo.mode == "parallel":
+        vol = algs.fbp(projs[:, ::-1, :], geo, angles)
+    else:
+        vol = algs.fdk(projs[:, ::-1, :], geo, angles)
+```
+
+以及：
+
+```python
+if method == "fdk":
+    ct_pred = algs.fdk(projs[:, ::-1, :], geo, angles)
+```
+
+修改后代码：
+
+```python
+if recon_method in {"fdk", "fbp"}:
+    # TIGRE uses FBP for parallel-beam geometry and FDK for cone-beam.
+    if geo.mode == "parallel":
+        vol = algs.fbp(projs[:, ::-1, :], geo, angles)
+    else:
+        vol = algs.fdk(projs[:, ::-1, :], geo, angles)
+```
+
+以及：
+
+```python
+if method in {"fdk", "fbp"}:
+    if geo.mode == "parallel":
+        ct_pred = algs.fbp(projs[:, ::-1, :], geo, angles)
+    else:
+        ct_pred = algs.fdk(projs[:, ::-1, :], geo, angles)
+```
+
+修改原因：
+
+    平行束不能调用 FDK；平行束必须调用 FBP。
+    锥束仍然使用 FDK。
+    现在算法名称和 geometry.mode 同时参与判断，避免把平行束结果误保存为 FDK。
+
+六、data_generator/real_dataset/generate_data.py
+------------------------------------------------
+
+修改位置：角度生成、MAT读取、scanner_cfg和元数据。
+
+原代码角度生成：
+
+```python
+angles = np.concatenate(
+    [np.arange(angle_start, angle_last, angle_interval), [angle_last]]
+)
+angles = angles / 180.0 * np.pi
+```
+
+修改后代码：
+
+```python
+angles = np.concatenate(
+    [np.arange(angle_start, angle_last, angle_interval), [angle_last]]
+)
+if (
+    geometry_type == "ParallelBeam"
+    and len(angles) > 1
+    and np.isclose(angles[-1] - angles[0], 180.0, atol=1e-4)
+):
+    # For parallel beam, the 180-degree endpoint duplicates the 0-degree view.
+    angles = angles[:-1]
+    n_proj = len(angles)
+angles = angles / 180.0 * np.pi
+```
+
+原代码只保存训练/测试投影：
+
+```python
+proj = np.load(osp.join(output_path, projection_train_list[0]["file_path"]))
+nDetector = [proj.shape[0], proj.shape[1]]
+```
+
+修改后增加全部投影：
+
+```python
+proj = np.load(osp.join(output_path, projection_train_list[0]["file_path"]))
+all_proj_paths = sorted(glob.glob(osp.join(all_save_path, "*.npy")))
+all_projs = np.stack([np.load(path) for path in all_proj_paths], axis=0)
+np.save(osp.join(output_path, "proj_all.npy"), all_projs)
+nDetector = [proj.shape[0], proj.shape[1]]
+```
+
+原代码scanner滤波器：
+
+```python
+"filter": None,
+```
+
+修改后：
+
+```python
+"filter": args.filter,
+```
+
+原代码元数据结束于训练和测试列表：
+
+```python
+meta_data = {
+    "scanner": scanner_cfg,
+    "vol": "vol_gt.npy",
+    "radius": 1.0,
+    "bbox": bbox,
+    "proj_train": projection_train_list,
+    "proj_test": projection_test_list,
+}
+```
+
+修改后增加来源信息：
+
+```python
+meta_data = {
+    "scanner": scanner_cfg,
+    "vol": "vol_gt.npy",
+    "radius": 1.0,
+    "bbox": bbox,
+    "proj_train": projection_train_list,
+    "proj_test": projection_test_list,
+    "source": {
+        "algorithm": (
+            "TIGRE parallel-beam FBP"
+            if scanner_cfg["mode"] == "parallel"
+            else "TIGRE FDK"
+        ),
+        "n_views": len(angles),
+        "angles_all": [float(angle) for angle in angles],
+        "removed_duplicate_endpoint": geometry_type == "ParallelBeam",
+    },
+}
+```
+
+七、scripts/run_traditional_methods.py
+---------------------------------------
+
+修改位置：传统算法输入投影和算法列表。
+
+原代码：
+
+```python
+projs_train = np.concatenate(
+    [t2a(c.original_image) for c in scene.getTrainCameras()],
+    axis=0,
+)
+train_angles = np.stack([c.angle for c in scene.getTrainCameras()], axis=0)
+methods = ["fdk", "sart", "asd_pocs"]
+```
+
+修改后：
+
+```python
+projs_train = np.concatenate(
+    [t2a(c.original_image) for c in scene.getTrainCameras()], axis=0
+)
+train_angles = np.stack([c.angle for c in scene.getTrainCameras()], axis=0)
+
+full_projection_path = osp.join(dataset.source_path, "proj_all.npy")
+metadata_path = osp.join(dataset.source_path, "meta_data.json")
+if osp.exists(full_projection_path) and osp.exists(metadata_path):
+    with open(metadata_path, "r", encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    angles_all = metadata.get("source", {}).get("angles_all")
+    if angles_all is not None:
+        projs_train = np.load(full_projection_path).astype(np.float32)
+        projs_train *= scene.scene_scale
+        train_angles = np.asarray(angles_all, dtype=np.float32)
+        print(f"Traditional reconstruction uses all {len(train_angles)} views")
+
+methods = ["fbp", "sart", "asd_pocs"]
+```
+
+修改原因：传统重建也应使用全部360个唯一视角；平行束结果目录使用 `fbp`，避免实际调用 FBP 却命名为 `fdk`。
+
+八、新增 scripts/scan_fbp_center.py
+-----------------------------------
+
+原代码：不存在旋转中心自动搜索脚本。
+
+修改后核心代码：
+
+```python
+base_offset = np.asarray(
+    scanner.get("offDetector", [0.0, 0.0]), dtype=np.float32
+)
+detector_pixel_u = (
+    float(scanner["sDetector"][1]) / float(scanner["nDetector"][1])
+)
+input_tigre = projections[:, ::-1, :]
+
+for u_px in candidates:
+    scanner_candidate = copy.deepcopy(scanner)
+    offset = base_offset.copy()
+    offset[0] = base_offset[0] + u_px * detector_pixel_u
+    scanner_candidate["offDetector"] = offset.tolist()
+    geo = get_geometry_tigre(scanner_candidate)
+    volume = algs.fbp(input_tigre, geo, angles)
+    rendered = tigre.Ax(volume, geo, angles)
+    residual = rendered - input_tigre
+    rmse = float(
+        np.sqrt(np.mean(residual ** 2))
+        / max(float(np.sqrt(np.mean(input_tigre ** 2))), 1e-8)
+    )
+```
+
+脚本搜索 `offDetector[0]`，即投影列方向的 u 偏移。默认搜索范围为 -10 到 +10 像素，默认步长为0.5像素；最终以归一化重投影 RMSE 最小的候选值作为旋转中心建议值。
+
+九、最终代码验证
+-----------------
+
+使用项目环境执行：
+
+```powershell
+& D:\CondaData\envs\r2_gaussian\python.exe -m py_compile `
+  prepare_fbp_tiff.py `
+  init_from_fbp.py `
+  initialize_pcd.py `
+  data_generator\real_dataset\generate_data.py `
+  r2_gaussian\utils\ct_utils.py `
+  scripts\run_traditional_methods.py `
+  scripts\scan_fbp_center.py
+```
+
+结果：语法检查通过。
+
+实际 FBP 结果：
+
+    输入 TIFF：361张
+    唯一角度：360张
+    投影尺寸：176 x 177
+    FBP体：128 x 128 x 128，全部为有限值
+    训练投影：50张
+    测试投影：100张
+    FBP滤波器：hann
+    detector位移：5像素
+
+实际初始化结果：
+
+    初始化点数：50000
+    输出形状：(50000, 4)
+    四列：x、y、z、density
