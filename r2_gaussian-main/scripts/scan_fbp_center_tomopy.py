@@ -9,6 +9,7 @@ import argparse
 import csv
 import inspect
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -22,11 +23,30 @@ def parse_args():
     parser.add_argument("--algorithm", default="scipy")
     parser.add_argument("--slice_step", type=int, default=8)
     parser.add_argument("--slice_margin", type=int, default=8)
+    parser.add_argument(
+        "--max_slices",
+        type=int,
+        default=9,
+        help="Maximum number of detector rows to evaluate; 0 means no limit",
+    )
+    parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--output", type=Path, default=None)
     return parser.parse_args()
 
 
 def main(args):
+    # Limit numerical-library threads before importing TomoPy/numexpr.
+    # AutoDL machines may expose more CPUs than numexpr allows by default.
+    threads = max(1, min(int(args.threads), 64))
+    for name in (
+        "NUMEXPR_MAX_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+    ):
+        os.environ[name] = str(threads)
+
     try:
         import tomopy
     except ModuleNotFoundError as exc:
@@ -61,6 +81,11 @@ def main(args):
     indices = np.arange(margin, n_slices - margin, max(1, int(args.slice_step)))
     if indices.size == 0:
         raise ValueError("No detector rows remain after applying slice_margin")
+    if args.max_slices > 0 and indices.size > args.max_slices:
+        selected = np.linspace(0, indices.size - 1, args.max_slices).round().astype(int)
+        indices = indices[selected]
+    print(f"Using {indices.size} detector rows with {threads} numerical threads: "
+          f"{indices.tolist()}")
 
     init_px = projections.shape[2] / 2.0 if args.init_px is None else args.init_px
     centers = []
