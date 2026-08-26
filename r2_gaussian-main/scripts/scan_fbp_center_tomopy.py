@@ -7,6 +7,7 @@ this script converts it to TIGRE's ``offDetector[0]`` physical offset.
 
 import argparse
 import csv
+import inspect
 import json
 from pathlib import Path
 
@@ -64,6 +65,11 @@ def main(args):
     init_px = projections.shape[2] / 2.0 if args.init_px is None else args.init_px
     centers = []
     rows = []
+    try:
+        find_center_parameters = inspect.signature(tomopy.find_center).parameters
+    except (TypeError, ValueError):
+        find_center_parameters = {}
+
     for index in indices:
         kwargs = {
             "ind": int(index),
@@ -72,17 +78,14 @@ def main(args):
             "mask": True,
             "ratio": 0.5,
             "sinogram_order": False,
-            "verbose": False,
         }
-        try:
-            center = tomopy.find_center(
-                projections,
-                angles,
-                algorithm=args.algorithm,
-                **kwargs,
-            )
-        except TypeError:
-            center = tomopy.find_center(projections, angles, **kwargs)
+        # TomoPy 1.15 does not expose ``algorithm`` or ``verbose`` in
+        # find_center(); pass optional arguments only when supported.
+        if "algorithm" in find_center_parameters:
+            kwargs["algorithm"] = args.algorithm
+        if "verbose" in find_center_parameters:
+            kwargs["verbose"] = False
+        center = tomopy.find_center(projections, angles, **kwargs)
         center = float(np.asarray(center).reshape(-1)[0])
         centers.append(center)
         rows.append({"slice": int(index), "center_px": center})
