@@ -16,6 +16,41 @@ import tigre
 import tigre.algorithms as algs
 
 
+def save_fbp_preview(output, volume, s_voxel, preview_percentiles=(1.0, 99.5)):
+    """Save immediately viewable orthogonal slices and a correctly scaled NIfTI."""
+    import SimpleITK as sitk
+    from PIL import Image
+
+    volume = np.asarray(volume, dtype=np.float32)
+    positive = volume[np.isfinite(volume) & (volume > 0)]
+    if positive.size == 0:
+        raise ValueError("FBP volume contains no positive voxels for preview")
+    low, high = np.percentile(positive, preview_percentiles)
+    if not np.isfinite(low) or not np.isfinite(high) or high <= low:
+        low = float(positive.min())
+        high = float(positive.max())
+    display = np.clip((volume - low) / (high - low), 0.0, 1.0)
+    center = tuple(int(size // 2) for size in volume.shape)
+
+    # The array convention is (x, y, z); save all three central planes.
+    planes = {
+        "x": display[center[0], :, :],
+        "y": display[:, center[1], :],
+        "z": display[:, :, center[2]],
+    }
+    for axis, plane in planes.items():
+        Image.fromarray(np.round(plane * 255.0).astype(np.uint8)).save(
+            output / f"vol_fbp_preview_{axis}.png"
+        )
+
+    # Keep the full dynamic range for Slicer; PNGs are only for quick viewing.
+    preview_image = sitk.GetImageFromArray(volume.transpose(2, 0, 1))
+    spacing = tuple(float(size) / float(count) for size, count in zip(s_voxel, volume.shape))
+    preview_image.SetSpacing(spacing)
+    sitk.WriteImage(preview_image, str(output / "vol_fbp_preview.nii.gz"))
+    return float(low), float(high)
+
+
 def parse_config(path):
     values = {}
     if path is not None:
@@ -211,6 +246,11 @@ def main(args):
     volume = np.clip(volume_raw, 0.0, None)
     np.save(output / "vol_fbp_raw.npy", volume_raw)
     np.save(output / "vol_fbp.npy", volume)
+    preview_low, preview_high = save_fbp_preview(
+        output,
+        volume,
+        args.sVoxel,
+    )
 
     rng = random.Random(args.seed)
     train_indices = np.linspace(0, len(angles) - 1, args.n_train).round().astype(int)
@@ -275,6 +315,11 @@ def main(args):
     with (output / "meta_data.json").open("w", encoding="utf-8") as handle:
         json.dump(metadata, handle, indent=2)
     print(f"Saved FBP volume: {output / 'vol_fbp.npy'}")
+    print(
+        f"Saved FBP previews: {output / 'vol_fbp_preview_z.png'} and "
+        f"{output / 'vol_fbp_preview.nii.gz'} "
+        f"(window {preview_low:.6g} ~ {preview_high:.6g})"
+    )
     print(
         f"Saved {len(angles)} full views, {len(train_records)} training views, "
         f"and {len(test_records)} test views"

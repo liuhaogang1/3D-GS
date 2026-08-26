@@ -83,9 +83,19 @@ def main(args):
             f"{projections.shape} and {angles.shape}"
         )
 
-    # Do not append a duplicate 180-degree endpoint here. TomoPy expects the
-    # usual half-scan [0, pi) sequence; a repeated endpoint can bias the
-    # center search.
+    # VO uses the 0/180-degree pair explicitly. The preparation script keeps
+    # that pair separately because TIGRE FBP should use only unique views.
+    vo_projections = projections
+    endpoint_name = metadata.get("source", {}).get("endpoint_pair")
+    if args.method == "vo" and endpoint_name:
+        endpoint_path = args.data / endpoint_name
+        if endpoint_path.is_file():
+            endpoint_pair = np.load(endpoint_path).astype(np.float32)
+            if endpoint_pair.shape == (2,) + projections.shape[1:]:
+                vo_projections = np.concatenate(
+                    [projections, endpoint_pair[1:2]], axis=0
+                )
+                print("Using the preserved 180-degree endpoint for find_center_vo.")
 
     n_slices = projections.shape[1]
     margin = max(0, int(args.slice_margin))
@@ -118,7 +128,7 @@ def main(args):
                 "ratio": 0.5,
                 "drop": True,
             }
-            center = tomopy.find_center_vo(projections, **vo_kwargs)
+            center = tomopy.find_center_vo(vo_projections, **vo_kwargs)
         else:
             kwargs = {
                 "ind": int(index),
