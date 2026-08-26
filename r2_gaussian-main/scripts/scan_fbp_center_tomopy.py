@@ -38,14 +38,15 @@ def main(args):
     # Limit numerical-library threads before importing TomoPy/numexpr.
     # AutoDL machines may expose more CPUs than numexpr allows by default.
     threads = max(1, min(int(args.threads), 64))
+    max_threads = max(64, int(os.cpu_count() or 64))
     for name in (
-        "NUMEXPR_MAX_THREADS",
-        "NUMEXPR_NUM_THREADS",
         "OMP_NUM_THREADS",
         "MKL_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",
     ):
         os.environ[name] = str(threads)
+    os.environ["NUMEXPR_MAX_THREADS"] = str(max_threads)
+    os.environ["NUMEXPR_NUM_THREADS"] = str(threads)
 
     try:
         import tomopy
@@ -54,6 +55,13 @@ def main(args):
             "TomoPy is not installed in the active Python environment. "
             "Install it first, for example: conda install -c conda-forge tomopy"
         ) from exc
+
+    try:
+        import numexpr
+
+        numexpr.set_num_threads(threads)
+    except (ImportError, ValueError):
+        pass
 
     with (args.data / "meta_data.json").open("r", encoding="utf-8") as handle:
         metadata = json.load(handle)
@@ -96,6 +104,7 @@ def main(args):
         find_center_parameters = {}
 
     for index in indices:
+        print(f"Finding center for detector row {int(index)}...", flush=True)
         kwargs = {
             "ind": int(index),
             "init": float(init_px),
