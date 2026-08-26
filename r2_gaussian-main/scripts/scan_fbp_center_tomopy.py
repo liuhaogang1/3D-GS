@@ -75,14 +75,9 @@ def main(args):
             f"{projections.shape} and {angles.shape}"
         )
 
-    endpoint_name = metadata.get("source", {}).get("endpoint_pair")
-    if endpoint_name:
-        endpoint_path = args.data / endpoint_name
-        if endpoint_path.is_file():
-            endpoint_pair = np.load(endpoint_path).astype(np.float32)
-            if endpoint_pair.shape[0] == 2 and endpoint_pair.shape[1:] == projections.shape[1:]:
-                projections = np.concatenate([projections, endpoint_pair[1:2]], axis=0)
-                angles = np.concatenate([angles, np.asarray([np.pi], dtype=np.float32)])
+    # Do not append a duplicate 180-degree endpoint here. TomoPy expects the
+    # usual half-scan [0, pi) sequence; a repeated endpoint can bias the
+    # center search and is not needed for find_center().
 
     n_slices = projections.shape[1]
     margin = max(0, int(args.slice_margin))
@@ -126,6 +121,20 @@ def main(args):
 
     center_px = float(np.median(centers))
     detector_width = float(projections.shape[2])
+    center_p10 = float(np.percentile(centers, 10))
+    center_p90 = float(np.percentile(centers, 90))
+    center_spread = center_p90 - center_p10
+    if (
+        center_px < -0.1 * detector_width
+        or center_px > 1.1 * detector_width
+        or center_spread > max(5.0, 0.02 * detector_width)
+    ):
+        raise SystemExit(
+            "Invalid TomoPy center estimate: "
+            f"median={center_px:.6f}, p10={center_p10:.6f}, "
+            f"p90={center_p90:.6f}. Do not use offDetector; "
+            "try a central, high-signal detector row and inspect the per-row CSV."
+        )
     offset_px = detector_width / 2.0 - center_px
     detector_pixel_u = float(scanner["sDetector"][1]) / float(scanner["nDetector"][1])
     offset = offset_px * detector_pixel_u
@@ -139,8 +148,7 @@ def main(args):
     print(f"TomoPy median center: {center_px:.6f} pixels")
     print(f"Absolute detector offset: {offset_px:+.6f} pixels")
     print(f"Set scanner.offDetector[0] to approximately {offset:.8g}")
-    print(f"Center spread: p10={np.percentile(centers, 10):.6f}, "
-          f"p90={np.percentile(centers, 90):.6f} pixels")
+    print(f"Center spread: p10={center_p10:.6f}, p90={center_p90:.6f} pixels")
     print(f"Saved per-slice results to {output}")
 
 
