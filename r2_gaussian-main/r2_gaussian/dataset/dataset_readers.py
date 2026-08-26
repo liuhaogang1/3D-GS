@@ -117,7 +117,11 @@ def readCTameras(meta_data, source_path, eval=False, scene_scale=1.0):
             frame_angle = frame_info["angle"]
 
             # CT 'transform_matrix' is a camera-to-world transform
-            c2w = angle2pose(cam_cfg["DSO"], frame_angle)  # c2w
+            c2w = angle2pose(
+                cam_cfg["DSO"],
+                frame_angle,
+                offDetector=cam_cfg.get("offDetector", [0.0, 0.0]),
+            )  # c2w
             # get the world-to-camera transform and set R, T
             w2c = np.linalg.inv(c2w)
             R = np.transpose(
@@ -153,7 +157,7 @@ def readCTameras(meta_data, source_path, eval=False, scene_scale=1.0):
     return cam_infos
 
 
-def angle2pose(DSO, angle):
+def angle2pose(DSO, angle, offDetector=None):
     """Transfer angle to pose (c2w) based on scanner geometry.
     1. rotate -90 degree around x-axis (fixed axis),
     2. rotate 90 degree around z-axis  (fixed axis),
@@ -183,7 +187,14 @@ def angle2pose(DSO, angle):
         ]
     )
     rot = np.dot(np.dot(R3, R2), R1)
-    trans = np.array([DSO * np.cos(angle), DSO * np.sin(angle), 0])
+    trans = np.array([DSO * np.cos(angle), DSO * np.sin(angle), 0.0])
+    if offDetector is not None:
+        # offDetector is stored as [u, v].  The camera's local +x axis is
+        # the detector-u direction; local +y is detector-v direction.
+        u_offset, v_offset = np.asarray(offDetector, dtype=np.float64)[:2]
+        detector_u = rot[:, 0]
+        detector_v = rot[:, 1]
+        trans = trans + u_offset * detector_u + v_offset * detector_v
     transform = np.eye(4)
     transform[:3, :3] = rot
     transform[:3, 3] = trans
@@ -259,7 +270,11 @@ def readNAFInfo(path, eval):
             sys.stdout.flush()
 
             frame_angle = angles[i_split]
-            c2w = angle2pose(scanner_cfg["DSO"], frame_angle)
+            c2w = angle2pose(
+                scanner_cfg["DSO"],
+                frame_angle,
+                offDetector=scanner_cfg.get("offDetector", [0.0, 0.0]),
+            )
             # get the world-to-camera transform and set R, T
             w2c = np.linalg.inv(c2w)
             R = np.transpose(

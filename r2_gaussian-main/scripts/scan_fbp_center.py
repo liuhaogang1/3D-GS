@@ -1,4 +1,9 @@
-"""Estimate horizontal detector offset from the 0/180 degree endpoint pair."""
+"""Estimate absolute horizontal detector offset from a 0/180 pair.
+
+The scan value is an absolute offset relative to the zero-offset geometry.
+It is deliberately not added to the current metadata offset, so rerunning
+the scan after updating ``offDetector`` does not accumulate the correction.
+"""
 
 import argparse
 import csv
@@ -65,7 +70,6 @@ def main(args):
     endpoint_pair = np.load(endpoint_path).astype(np.float32)
     if endpoint_pair.shape[0] != 2 or endpoint_pair.ndim != 3:
         raise ValueError(f"Expected (2,H,W), got {endpoint_pair.shape}")
-    base_offset = np.asarray(scanner.get("offDetector", [0.0, 0.0]), dtype=np.float32)
     detector_pixel_u = float(scanner["sDetector"][1]) / float(scanner["nDetector"][1])
     candidates = np.arange(
         args.u_min_px, args.u_max_px + args.u_step_px * 0.5, args.u_step_px
@@ -82,7 +86,7 @@ def main(args):
         )
         result = {
             "u_offset_px": float(u_px),
-            "u_offset": float(base_offset[0] + u_px * detector_pixel_u),
+            "u_offset": float(u_px * detector_pixel_u),
             "pair_score": score,
         }
         results.append(result)
@@ -97,7 +101,7 @@ def main(args):
         )
         writer.writeheader()
         writer.writerows(results)
-    print(f"Best horizontal detector offset: {best['u_offset_px']:+.3f} pixels")
+    print(f"Best absolute horizontal detector offset: {best['u_offset_px']:+.3f} pixels")
     print(f"Set scanner.offDetector[0] to approximately {best['u_offset']:.8g}")
     print(f"Saved scan results to {output}")
 
