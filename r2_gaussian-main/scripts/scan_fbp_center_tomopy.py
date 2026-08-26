@@ -20,7 +20,15 @@ def parse_args():
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--init_px", type=float, default=None)
     parser.add_argument("--tol", type=float, default=0.25)
+    parser.add_argument(
+        "--method",
+        choices=["vo", "scipy"],
+        default="vo",
+        help="TomoPy center method; vo is bounded and robust for real data",
+    )
     parser.add_argument("--algorithm", default="scipy")
+    parser.add_argument("--search_min_px", type=float, default=-100.0)
+    parser.add_argument("--search_max_px", type=float, default=100.0)
     parser.add_argument("--slice_step", type=int, default=8)
     parser.add_argument("--slice_margin", type=int, default=8)
     parser.add_argument(
@@ -77,7 +85,7 @@ def main(args):
 
     # Do not append a duplicate 180-degree endpoint here. TomoPy expects the
     # usual half-scan [0, pi) sequence; a repeated endpoint can bias the
-    # center search and is not needed for find_center().
+    # center search.
 
     n_slices = projections.shape[1]
     margin = max(0, int(args.slice_margin))
@@ -100,21 +108,32 @@ def main(args):
 
     for index in indices:
         print(f"Finding center for detector row {int(index)}...", flush=True)
-        kwargs = {
-            "ind": int(index),
-            "init": float(init_px),
-            "tol": float(args.tol),
-            "mask": True,
-            "ratio": 0.5,
-            "sinogram_order": False,
-        }
-        # TomoPy 1.15 does not expose ``algorithm`` or ``verbose`` in
-        # find_center(); pass optional arguments only when supported.
-        if "algorithm" in find_center_parameters:
-            kwargs["algorithm"] = args.algorithm
-        if "verbose" in find_center_parameters:
-            kwargs["verbose"] = False
-        center = tomopy.find_center(projections, angles, **kwargs)
+        if args.method == "vo":
+            vo_kwargs = {
+                "ind": int(index),
+                "smin": float(args.search_min_px),
+                "smax": float(args.search_max_px),
+                "srad": 6.0,
+                "step": float(args.tol),
+                "ratio": 0.5,
+                "drop": True,
+            }
+            center = tomopy.find_center_vo(projections, **vo_kwargs)
+        else:
+            kwargs = {
+                "ind": int(index),
+                "init": float(init_px),
+                "tol": float(args.tol),
+                "mask": True,
+                "ratio": 0.5,
+                "sinogram_order": False,
+            }
+            # Older TomoPy releases do not expose these optional arguments.
+            if "algorithm" in find_center_parameters:
+                kwargs["algorithm"] = args.algorithm
+            if "verbose" in find_center_parameters:
+                kwargs["verbose"] = False
+            center = tomopy.find_center(projections, angles, **kwargs)
         center = float(np.asarray(center).reshape(-1)[0])
         centers.append(center)
         rows.append({"slice": int(index), "center_px": center})
