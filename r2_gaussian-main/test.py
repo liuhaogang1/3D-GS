@@ -138,12 +138,20 @@ def evaluate_volume(
     np.save(osp.join(save_path, "vol_gt.npy"), t2a(vol_gt))
     np.save(osp.join(save_path, "vol_pred.npy"), t2a(vol_pred))
     # For visualization with 3D slicer
+    voxel_spacing = tuple(
+        float(size) / float(count)
+        for size, count in zip(scanner_cfg["sVoxel"], scanner_cfg["nVoxel"])
+    )
+    gt_image = sitk.GetImageFromArray(t2a(vol_gt).transpose(2, 0, 1))
+    gt_image.SetSpacing(voxel_spacing)
     sitk.WriteImage(
-        sitk.GetImageFromArray(t2a(vol_gt).transpose(2, 0, 1)),
+        gt_image,
         os.path.join(save_path, "vol_gt.nii.gz"),
     )
+    pred_image = sitk.GetImageFromArray(t2a(vol_pred).transpose(2, 0, 1))
+    pred_image.SetSpacing(voxel_spacing)
     sitk.WriteImage(
-        sitk.GetImageFromArray(t2a(vol_pred).transpose(2, 0, 1)),
+        pred_image,
         os.path.join(save_path, "vol_pred.nii.gz"),
     )
 
