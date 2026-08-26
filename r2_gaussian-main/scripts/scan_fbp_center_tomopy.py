@@ -1,68 +1,73 @@
-"""Find the absolute horizontal detector center with TomoPy.
-
-The input projections must already be flat-field corrected and converted to
-line integrals. TomoPy returns the detector-center coordinate in pixels;
-this script converts it to TIGRE's ``offDetector[0]`` physical offset.
-"""
+"""Find the rotation center directly from the original TIFF projections."""
 
 import argparse
 import csv
 import inspect
 import json
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
+import tifffile
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from scripts.fbp_preprocess import build_angles, process_projection
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data", type=Path, required=True)
+    parser.add_argument("--input_dir", type=Path, required=True)
+    parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--angle_start", type=float, default=0.0)
+    parser.add_argument("--angle_interval", type=float, default=0.5)
+    parser.add_argument("--keep_duplicate_endpoint", action="store_true")
+    parser.add_argument(
+        "--input_type",
+        choices=["transmission", "intensity", "line_integral"],
+        default="line_integral",
+    )
+    parser.add_argument("--i0", type=float, default=1.0)
+    parser.add_argument("--i0_percentile", type=float, default=99.5)
+    parser.add_argument("--zero_policy", choices=["nearest", "clip", "keep"], default="nearest")
+    parser.add_argument("--log_eps", type=float, default=1e-6)
+    parser.add_argument("--clip_percentile", type=float, default=99.9)
+    parser.add_argument("--shift_v", type=int, default=0)
+    parser.add_argument("--pixel_subsample", type=int, default=1)
+    parser.add_argument("--resize_order", type=int, choices=[0, 1, 3], default=1)
+    parser.add_argument("--projection_scale", type=float, default=1.0)
+    parser.add_argument("--pixel_size", type=float, default=0.02)
+    parser.add_argument("--method", choices=["vo", "scipy"], default="vo")
     parser.add_argument("--init_px", type=float, default=None)
     parser.add_argument("--tol", type=float, default=0.25)
-    parser.add_argument(
-        "--method",
-        choices=["vo", "scipy"],
-        default="vo",
-        help="TomoPy center method; vo is bounded and robust for real data",
-    )
     parser.add_argument("--algorithm", default="scipy")
     parser.add_argument("--search_min_px", type=float, default=-100.0)
     parser.add_argument("--search_max_px", type=float, default=100.0)
     parser.add_argument("--slice_step", type=int, default=8)
-    parser.add_argument("--slice_margin", type=int, default=8)
-    parser.add_argument(
-        "--max_slices",
-        type=int,
-        default=9,
-        help="Maximum number of detector rows to evaluate; 0 means no limit",
-    )
+    parser.add_argument("--slice_margin", type=int, default=128)
+    parser.add_argument("--max_slices", type=int, default=9)
     parser.add_argument("--threads", type=int, default=8)
-    parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
 
-def main(args):
-    # Limit numerical-library threads before importing TomoPy/numexpr.
-    # AutoDL machines may expose more CPUs than numexpr allows by default.
-    threads = max(1, min(int(args.threads), 64))
+def configure_threads(threads):
+    threads = max(1, min(int(threads), 64))
     max_threads = max(64, int(os.cpu_count() or 64))
-    for name in (
-        "OMP_NUM_THREADS",
-        "MKL_NUM_THREADS",
-        "OPENBLAS_NUM_THREADS",
-    ):
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
         os.environ[name] = str(threads)
     os.environ["NUMEXPR_MAX_THREADS"] = str(max_threads)
     os.environ["NUMEXPR_NUM_THREADS"] = str(threads)
+    return threads
 
+
+def main(args):
+    threads = configure_threads(args.threads)
     try:
         import tomopy
     except ModuleNotFoundError as exc:
-        raise SystemExit(
-            "TomoPy is not installed in the active Python environment. "
-            "Install it first, for example: conda install -c conda-forge tomopy"
-        ) from exc
+        raise SystemExit("TomoPy is not installed in the active environment") from exc
 
     try:
         import numexpr
@@ -71,42 +76,38 @@ def main(args):
     except (ImportError, ValueError):
         pass
 
-    with (args.data / "meta_data.json").open("r", encoding="utf-8") as handle:
-        metadata = json.load(handle)
+    input_dir = args.input_dir.resolve()
+    if args.config is None:
+        config_candidates = sorted(input_dir.glob("*.txt"))
+        args.config = config_candidates[0] if len(config_candidates) == 1 else None
+    paths = sorted(input_dir.glob("*.tif")) + sorted(input_dir.glob("*.tiff"))
+    if not paths:
+        raise ValueError(f"No TIFF files found in {input_dir}")
 
-    scanner = metadata["scanner"]
-    projections = np.load(args.data / "proj_all.npy").astype(np.float32)
-    angles = np.asarray(metadata["source"]["angles_all"], dtype=np.float32)
-    if projections.ndim != 3 or len(projections) != len(angles):
-        raise ValueError(
-            f"Expected projections (N,H,W) matching angles, got "
-            f"{projections.shape} and {angles.shape}"
-        )
+    raw = [tifffile.imread(path) for path in paths]
+    processed_all = np.stack([process_projection(image, args) for image in raw], axis=0)
+    angles = build_angles(args, len(processed_all))
+    if len(angles) < 2:
+        raise ValueError("At least two projection angles are required")
+    projections = processed_all[: len(angles)]
 
-    # VO uses the 0/180-degree pair explicitly. The preparation script keeps
-    # that pair separately because TIGRE FBP should use only unique views.
+    # VO needs the actual 0/180 pair. TIGRE FBP will use only unique views.
     vo_projections = projections
-    endpoint_name = metadata.get("source", {}).get("endpoint_pair")
-    if args.method == "vo" and endpoint_name:
-        endpoint_path = args.data / endpoint_name
-        if endpoint_path.is_file():
-            endpoint_pair = np.load(endpoint_path).astype(np.float32)
-            if endpoint_pair.shape == (2,) + projections.shape[1:]:
-                vo_projections = np.concatenate(
-                    [projections, endpoint_pair[1:2]], axis=0
-                )
-                print("Using the preserved 180-degree endpoint for find_center_vo.")
+    if args.method == "vo" and len(processed_all) == len(angles) + 1:
+        vo_projections = processed_all
+        print("Using the original 180-degree endpoint for find_center_vo.")
 
     n_slices = projections.shape[1]
     margin = max(0, int(args.slice_margin))
     indices = np.arange(margin, n_slices - margin, max(1, int(args.slice_step)))
     if indices.size == 0:
-        raise ValueError("No detector rows remain after applying slice_margin")
+        raise ValueError("No detector rows remain after slice_margin")
     if args.max_slices > 0 and indices.size > args.max_slices:
         selected = np.linspace(0, indices.size - 1, args.max_slices).round().astype(int)
         indices = indices[selected]
-    print(f"Using {indices.size} detector rows with {threads} numerical threads: "
-          f"{indices.tolist()}")
+    print(f"Read {len(paths)} TIFFs from {input_dir}")
+    print(f"Processed projections: {processed_all.shape}")
+    print(f"Using detector rows: {indices.tolist()}")
 
     init_px = projections.shape[2] / 2.0 if args.init_px is None else args.init_px
     centers = []
@@ -119,16 +120,16 @@ def main(args):
     for index in indices:
         print(f"Finding center for detector row {int(index)}...", flush=True)
         if args.method == "vo":
-            vo_kwargs = {
-                "ind": int(index),
-                "smin": float(args.search_min_px),
-                "smax": float(args.search_max_px),
-                "srad": 6.0,
-                "step": float(args.tol),
-                "ratio": 0.5,
-                "drop": True,
-            }
-            center = tomopy.find_center_vo(vo_projections, **vo_kwargs)
+            center = tomopy.find_center_vo(
+                vo_projections,
+                ind=int(index),
+                smin=float(args.search_min_px),
+                smax=float(args.search_max_px),
+                srad=6.0,
+                step=float(args.tol),
+                ratio=0.5,
+                drop=True,
+            )
         else:
             kwargs = {
                 "ind": int(index),
@@ -138,7 +139,6 @@ def main(args):
                 "ratio": 0.5,
                 "sinogram_order": False,
             }
-            # Older TomoPy releases do not expose these optional arguments.
             if "algorithm" in find_center_parameters:
                 kwargs["algorithm"] = args.algorithm
             if "verbose" in find_center_parameters:
@@ -149,36 +149,55 @@ def main(args):
         rows.append({"slice": int(index), "center_px": center})
 
     center_px = float(np.median(centers))
-    detector_width = float(projections.shape[2])
-    center_p10 = float(np.percentile(centers, 10))
-    center_p90 = float(np.percentile(centers, 90))
-    center_spread = center_p90 - center_p10
-    if (
-        center_px < -0.1 * detector_width
-        or center_px > 1.1 * detector_width
-        or center_spread > max(5.0, 0.02 * detector_width)
-    ):
+    width = float(projections.shape[2])
+    p10 = float(np.percentile(centers, 10))
+    p90 = float(np.percentile(centers, 90))
+    spread = p90 - p10
+    if center_px < -0.1 * width or center_px > 1.1 * width or spread > max(5.0, 0.02 * width):
         raise SystemExit(
-            "Invalid TomoPy center estimate: "
-            f"median={center_px:.6f}, p10={center_p10:.6f}, "
-            f"p90={center_p90:.6f}. Do not use offDetector; "
-            "try a central, high-signal detector row and inspect the per-row CSV."
+            f"Invalid center: median={center_px:.6f}, p10={p10:.6f}, p90={p90:.6f}"
         )
-    offset_px = detector_width / 2.0 - center_px
-    detector_pixel_u = float(scanner["sDetector"][1]) / float(scanner["nDetector"][1])
-    offset = offset_px * detector_pixel_u
 
-    output = args.output or (args.data / "fbp_center_scan_tomopy.csv")
-    with output.open("w", newline="", encoding="utf-8") as handle:
+    center_reference = width / 2.0
+    detector_pixel_u = float(width * args.pixel_size * args.pixel_subsample) / width
+    offset_px = center_reference - center_px
+    offset_u = offset_px * detector_pixel_u
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    csv_path = args.output.with_suffix(".csv")
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=["slice", "center_px"])
         writer.writeheader()
         writer.writerows(rows)
 
+    result = {
+        "offDetector": [float(offset_u), 0.0],
+        "center_px": center_px,
+        "center_reference_px": center_reference,
+        "offset_px": float(offset_px),
+        "detector_pixel_u": detector_pixel_u,
+        "center_p10": p10,
+        "center_p90": p90,
+        "center_spread_px": spread,
+        "n_tiff": len(paths),
+        "processed_shape": [int(x) for x in processed_all.shape],
+        "input_dir": str(input_dir),
+        "input_type": args.input_type,
+        "shift_v": args.shift_v,
+        "pixel_subsample": args.pixel_subsample,
+        "projection_scale": args.projection_scale,
+        "pixel_size": args.pixel_size,
+        "method": args.method,
+        "per_slice_csv": str(csv_path.resolve()),
+    }
+    with args.output.open("w", encoding="utf-8") as handle:
+        json.dump(result, handle, indent=2)
+
     print(f"TomoPy median center: {center_px:.6f} pixels")
     print(f"Absolute detector offset: {offset_px:+.6f} pixels")
-    print(f"Set scanner.offDetector[0] to approximately {offset:.8g}")
-    print(f"Center spread: p10={center_p10:.6f}, p90={center_p90:.6f} pixels")
-    print(f"Saved per-slice results to {output}")
+    print(f"Set scanner.offDetector[0] to approximately {offset_u:.8g}")
+    print(f"Saved center JSON: {args.output}")
+    print(f"Saved per-slice CSV: {csv_path}")
 
 
 if __name__ == "__main__":
