@@ -13,13 +13,14 @@ import tifffile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts.fbp_preprocess import build_angles, process_projection
+from scripts.fbp_preprocess import build_angles, process_projection, sort_projection_paths
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_dir", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=None)
+    parser.add_argument("--angles_file", type=Path, default=None)
     parser.add_argument("--angle_start", type=float, default=0.0)
     parser.add_argument("--angle_interval", type=float, default=0.5)
     parser.add_argument("--keep_duplicate_endpoint", action="store_true")
@@ -80,7 +81,9 @@ def main(args):
     if args.config is None:
         config_candidates = sorted(input_dir.glob("*.txt"))
         args.config = config_candidates[0] if len(config_candidates) == 1 else None
-    paths = sorted(input_dir.glob("*.tif")) + sorted(input_dir.glob("*.tiff"))
+    paths = sort_projection_paths(
+        list(input_dir.glob("*.tif")) + list(input_dir.glob("*.tiff"))
+    )
     if not paths:
         raise ValueError(f"No TIFF files found in {input_dir}")
 

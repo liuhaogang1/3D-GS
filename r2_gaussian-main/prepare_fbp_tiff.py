@@ -13,7 +13,12 @@ import numpy as np
 import tifffile
 import tigre
 import tigre.algorithms as algs
-from scripts.fbp_preprocess import build_angles, parse_config, process_projection
+from scripts.fbp_preprocess import (
+    build_angles,
+    parse_config,
+    process_projection,
+    sort_projection_paths,
+)
 
 
 def save_fbp_preview(output, volume, s_voxel, preview_percentiles=(1.0, 99.5)):
@@ -99,6 +104,7 @@ def main(args):
     args.input_dir = Path(args.input_dir)
     args.output_dir = Path(args.output_dir)
     args.config = Path(args.config) if args.config else None
+    args.angles_file = Path(args.angles_file) if args.angles_file else None
     args.center_json = Path(args.center_json) if args.center_json else None
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         raise FileExistsError(
@@ -122,8 +128,9 @@ def main(args):
         config_candidates = sorted(args.input_dir.glob("*.txt"))
         args.config = config_candidates[0] if len(config_candidates) == 1 else None
 
-    paths = sorted(args.input_dir.glob("*.tif"))
-    paths += sorted(args.input_dir.glob("*.tiff"))
+    paths = sort_projection_paths(
+        list(args.input_dir.glob("*.tif")) + list(args.input_dir.glob("*.tiff"))
+    )
     if not paths:
         raise ValueError(f"No TIFF files found in {args.input_dir}")
 
@@ -245,6 +252,11 @@ if __name__ == "__main__":
     parser.add_argument("--input_dir", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--config", default=None)
+    parser.add_argument(
+        "--angles_file",
+        default=None,
+        help="Optional text file; its second column supplies one exact angle per TIFF.",
+    )
     parser.add_argument(
         "--center_json",
         default=None,

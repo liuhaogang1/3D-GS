@@ -20,7 +20,28 @@ def parse_config(path):
     return values
 
 
+def sort_projection_paths(paths):
+    """Sort projection files by their numeric suffix (not lexicographically)."""
+    def key(path):
+        stem = Path(path).stem
+        digits = "".join(character for character in reversed(stem) if character.isdigit())
+        return (int(digits[::-1]) if digits else -1, stem)
+
+    return sorted(paths, key=key)
+
+
 def build_angles(args, n_views):
+    angles_file = getattr(args, "angles_file", None)
+    if angles_file:
+        angles_path = Path(angles_file)
+        values = np.loadtxt(angles_path, ndmin=2)
+        if values.ndim != 2 or values.shape[1] < 2 or len(values) != n_views:
+            raise ValueError(
+                f"{angles_path} must contain {n_views} rows and at least two columns"
+            )
+        angles_deg = values[:, 1].astype(np.float32)
+        return np.deg2rad(angles_deg).astype(np.float32)
+
     config = parse_config(args.config)
     start = float(config.get("AngleFirst", args.angle_start))
     interval = float(config.get("AngleInterval", args.angle_interval))
