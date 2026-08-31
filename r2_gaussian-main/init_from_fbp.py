@@ -6,6 +6,53 @@ from pathlib import Path
 import numpy as np
 
 
+def visualize_initial_point_cloud(
+    point_cloud: np.ndarray,
+    output: Path,
+    max_points: int,
+    seed: int,
+    show: bool = True,
+) -> None:
+    """Show and save a 3D scatter preview of the FBP initialization points."""
+    import matplotlib.pyplot as plt
+
+    if max_points > 0 and len(point_cloud) > max_points:
+        rng = np.random.default_rng(seed)
+        selected = np.sort(rng.choice(len(point_cloud), max_points, replace=False))
+        point_cloud = point_cloud[selected]
+
+    positions = point_cloud[:, :3]
+    densities = point_cloud[:, 3]
+    figure = plt.figure(figsize=(9, 8))
+    axis = figure.add_subplot(111, projection="3d")
+    scatter = axis.scatter(
+        positions[:, 0],
+        positions[:, 1],
+        positions[:, 2],
+        c=densities,
+        cmap="viridis",
+        s=4,
+        alpha=0.75,
+        linewidths=0,
+    )
+    axis.set_xlabel("X")
+    axis.set_ylabel("Y")
+    axis.set_zlabel("Z")
+    axis.set_title(
+        f"FBP initialization ({len(point_cloud):,} points)\n"
+        f"density: {densities.min():.4g} - {densities.max():.4g}"
+    )
+    axis.set_box_aspect(np.maximum(np.ptp(positions, axis=0), 1e-6))
+    figure.colorbar(scatter, ax=axis, pad=0.1, label="density")
+    figure.tight_layout()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output, dpi=220)
+    print(f"Saved initialization visualization to {output}")
+    if show:
+        plt.show()
+    plt.close(figure)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--volume", type=Path, required=True)
@@ -25,6 +72,23 @@ def main():
         help="Normalize positive volume values by this percentile; 0 disables it.",
     )
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Show a 3D scatter plot of the initialized FBP point cloud.",
+    )
+    parser.add_argument(
+        "--visualize_output",
+        type=Path,
+        default=None,
+        help="Preview image path. Defaults to <output_stem>_preview.png.",
+    )
+    parser.add_argument(
+        "--visualize_max_points",
+        type=int,
+        default=50000,
+        help="Maximum points in the preview; 0 keeps all points.",
+    )
     args = parser.parse_args()
 
     volume = np.load(args.volume).astype(np.float32)
@@ -70,6 +134,17 @@ def main():
         np.save(canonical_output, point_cloud)
         print(f"Saved canonical initialization to {canonical_output}")
     print(f"density range: {densities.min():.6g} ~ {densities.max():.6g}")
+
+    if args.visualize:
+        preview_output = args.visualize_output
+        if preview_output is None:
+            preview_output = output.with_name(output.stem + "_preview.png")
+        visualize_initial_point_cloud(
+            point_cloud,
+            preview_output,
+            args.visualize_max_points,
+            args.seed,
+        )
 
 
 if __name__ == "__main__":

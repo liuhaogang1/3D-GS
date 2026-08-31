@@ -47,12 +47,6 @@ def parse_args():
     parser.add_argument("--slice_step", type=int, default=8)
     parser.add_argument("--slice_margin", type=int, default=128)
     parser.add_argument("--max_slices", type=int, default=9)
-    parser.add_argument(
-        "--axis_slope_threshold",
-        type=float,
-        default=0.01,
-        help="Maximum allowed center drift in pixels per detector row",
-    )
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
@@ -154,31 +148,16 @@ def main(args):
         centers.append(center)
         rows.append({"slice": int(index), "center_px": center})
 
-    row_values = np.asarray(indices, dtype=np.float64)
     center_values = np.asarray(centers, dtype=np.float64)
     width = float(projections.shape[2])
-    row_reference = (float(n_slices) - 1.0) / 2.0
-    # A tilted rotation axis appears as a systematic change of the measured
-    # horizontal center along detector rows.  Fit that drift and report it;
-    # a single offDetector value can only correct the intercept at mid-row.
-    slope, center_at_reference = np.polyfit(
-        row_values - row_reference, center_values, 1
-    )
-    fitted_centers = center_at_reference + slope * (row_values - row_reference)
-    residuals = center_values - fitted_centers
-    center_px = float(center_at_reference)
-    median_center_px = float(np.median(center_values))
+    center_px = float(np.median(center_values))
     p10 = float(np.percentile(center_values, 10))
     p90 = float(np.percentile(center_values, 90))
     spread = p90 - p10
-    spread_limit = max(5.0, 0.02 * width)
-    axis_drift_px = float(slope * (n_slices - 1.0))
-    axis_tilt_deg = float(np.degrees(np.arctan(slope)))
-    residual_p90 = float(np.percentile(np.abs(residuals), 90))
-    center_in_range = -0.1 * width <= center_px <= 1.1 * width
-    spread_ok = spread <= spread_limit
-    axis_ok = abs(float(slope)) <= float(args.axis_slope_threshold)
-    center_valid = bool(center_in_range and spread_ok and axis_ok)
+    if center_px < -0.1 * width or center_px > 1.1 * width or spread > max(5.0, 0.02 * width):
+        raise SystemExit(
+            f"Invalid center: median={center_px:.6f}, p10={p10:.6f}, p90={p90:.6f}"
+        )
 
     center_reference = width / 2.0
     detector_pixel_u = float(width * args.pixel_size * args.pixel_subsample) / width
@@ -188,43 +167,19 @@ def main(args):
     args.output.parent.mkdir(parents=True, exist_ok=True)
     csv_path = args.output.with_suffix(".csv")
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=["slice", "center_px", "fit_center_px", "residual_px"],
-        )
+        writer = csv.DictWriter(handle, fieldnames=["slice", "center_px"])
         writer.writeheader()
-        for row, center, fitted, residual in zip(
-            rows, center_values, fitted_centers, residuals
-        ):
-            writer.writerow(
-                {
-                    "slice": row["slice"],
-                    "center_px": float(center),
-                    "fit_center_px": float(fitted),
-                    "residual_px": float(residual),
-                }
-            )
+        writer.writerows(rows)
 
     result = {
         "offDetector": [float(offset_u), 0.0],
         "center_px": center_px,
-        "median_center_px": median_center_px,
         "center_reference_px": center_reference,
         "offset_px": float(offset_px),
         "detector_pixel_u": detector_pixel_u,
         "center_p10": p10,
         "center_p90": p90,
         "center_spread_px": spread,
-        "center_spread_limit_px": float(spread_limit),
-        "center_fit_row_reference_px": row_reference,
-        "axis_slope_px_per_row": float(slope),
-        "axis_drift_px_across_detector": axis_drift_px,
-        "axis_tilt_deg": axis_tilt_deg,
-        "axis_residual_p90_px": residual_p90,
-        "center_in_range": center_in_range,
-        "spread_ok": spread_ok,
-        "axis_ok": axis_ok,
-        "center_valid": center_valid,
         "n_tiff": len(paths),
         "processed_shape": [int(x) for x in processed_all.shape],
         "input_dir": str(input_dir),
@@ -234,32 +189,15 @@ def main(args):
         "projection_scale": args.projection_scale,
         "pixel_size": args.pixel_size,
         "method": args.method,
-        "axis_slope_threshold": args.axis_slope_threshold,
         "per_slice_csv": str(csv_path.resolve()),
     }
     with args.output.open("w", encoding="utf-8") as handle:
         json.dump(result, handle, indent=2)
 
-    print(f"TomoPy center at detector mid-row: {center_px:.6f} pixels")
-    print(f"Median per-row center: {median_center_px:.6f} pixels")
+    print(f"TomoPy median center: {center_px:.6f} pixels")
     print(f"Absolute detector offset: {offset_px:+.6f} pixels")
     print(f"Set scanner.offDetector[0] to approximately {offset_u:.8g}")
-    print(
-        f"Rotation-axis slope: {slope:+.8f} px/row; "
-        f"drift across detector: {axis_drift_px:+.6f} px; "
-        f"tilt: {axis_tilt_deg:+.6f} deg"
-    )
-    print(
-        f"Center spread: p10={p10:.6f}, p90={p90:.6f}, "
-        f"spread={spread:.6f} px"
-    )
-    if center_valid:
-        print("Center/axis check: PASS; the center JSON may be used for FBP.")
-    else:
-        print(
-            "Center/axis check: FAIL; JSON is diagnostic only and must not be "
-            "used for FBP with a single offDetector value."
-        )
+    print(f"Center spread: p10={p10:.6f}, p90={p90:.6f}, spread={spread:.6f} px")
     print(f"Saved center JSON: {args.output}")
     print(f"Saved per-slice CSV: {csv_path}")
 

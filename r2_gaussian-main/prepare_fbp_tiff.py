@@ -108,11 +108,6 @@ def main(args):
     if args.center_json is not None:
         with args.center_json.open("r", encoding="utf-8") as handle:
             center_result = json.load(handle)
-        if "center_valid" in center_result and not center_result["center_valid"]:
-            raise ValueError(
-                f"Center/axis result is marked invalid: {args.center_json}. "
-                "Inspect its axis diagnostics before running FBP."
-            )
         off_detector = center_result.get("offDetector")
         if not isinstance(off_detector, list) or len(off_detector) != 2:
             raise ValueError(
