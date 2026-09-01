@@ -61,8 +61,11 @@ def save_fbp_preview(output, volume, s_voxel, preview_percentiles=(1.0, 99.5)):
 def build_parallel_geometry(args, detector_shape):
     height, width = detector_shape
     effective_pixel_size = args.pixel_size * args.pixel_subsample
+    # For TIGRE parallel-beam geometry, axis 0 is aligned with detector V.
+    # Keep the public volume order (V/long-axis, Y, X) unchanged so a
+    # non-cubic detector such as 1059 x 119 maps to 1059 x 119 x 119.
     geo = tigre.geometry(
-        mode="parallel", nVoxel=np.asarray(args.nVoxel[::-1], dtype=np.int32)
+        mode="parallel", nVoxel=np.asarray(args.nVoxel, dtype=np.int32)
     )
     geo.DSD = float(args.DSD)
     geo.DSO = float(args.DSO)
@@ -72,10 +75,10 @@ def build_parallel_geometry(args, detector_shape):
         dtype=np.float32,
     )
     geo.dDetector = geo.sDetector / geo.nDetector
-    geo.nVoxel = np.asarray(args.nVoxel[::-1], dtype=np.int32)
-    geo.sVoxel = np.asarray(args.sVoxel[::-1], dtype=np.float32)
+    geo.nVoxel = np.asarray(args.nVoxel, dtype=np.int32)
+    geo.sVoxel = np.asarray(args.sVoxel, dtype=np.float32)
     geo.dVoxel = geo.sVoxel / geo.nVoxel
-    geo.offOrigin = np.asarray(args.offOrigin[::-1], dtype=np.float32)
+    geo.offOrigin = np.asarray(args.offOrigin, dtype=np.float32)
     # TIGRE stores detector pixels as [V, U], but offDetector is [u, v].
     # Keep the public scanner convention [u, v] here: the TomoPy center
     # estimate is a detector-column (u) offset and must affect the horizontal
@@ -205,7 +208,7 @@ def main(args):
 
     geo = build_parallel_geometry(args, projections.shape[1:])
     volume_tigre = algs.fbp(projections[:, ::-1, :], geo, angles)
-    volume_raw = np.transpose(volume_tigre, (2, 1, 0)).astype(np.float32)
+    volume_raw = np.asarray(volume_tigre, dtype=np.float32)
     expected_shape = tuple(int(size) for size in args.nVoxel)
     if volume_raw.shape != expected_shape:
         raise ValueError(
