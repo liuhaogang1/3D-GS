@@ -13,11 +13,13 @@ import numpy as np
 import tifffile
 import tigre
 import tigre.algorithms as algs
+from scipy.ndimage import gaussian_filter1d
 from scripts.fbp_preprocess import (
     build_angles,
     parse_config,
     process_projection,
     sort_projection_paths,
+    sort_views_by_angles,
 )
 
 
@@ -84,6 +86,47 @@ def build_parallel_geometry(args, detector_shape):
     return geo
 
 
+def adjust_fbp_volume(volume_raw, sign_mode, background_percentile, background_sigma):
+    """Make a usable non-negative density volume from a signed FBP result.
+
+    The unprocessed reconstruction is kept separately.  This correction only
+    chooses the global sign when TIGRE returns an all-negative volume and
+    removes a slowly varying axial baseline that otherwise becomes the point
+    cloud background for this data set.
+    """
+    volume = np.asarray(volume_raw, dtype=np.float32).copy()
+    if not np.isfinite(volume).all():
+        raise ValueError("FBP volume contains NaN or Inf")
+
+    if sign_mode == "negative":
+        volume *= -1.0
+    elif sign_mode == "auto":
+        # A valid positive-density FBP may contain negative ringing, but an
+        # entirely non-positive result is a clear global sign inversion.
+        if float(np.max(volume)) <= 0.0 and float(np.min(volume)) < 0.0:
+            volume *= -1.0
+    elif sign_mode != "positive":
+        raise ValueError(f"Unsupported volume sign mode: {sign_mode}")
+
+    if background_percentile < -1 or background_percentile >= 100:
+        raise ValueError("volume_background_percentile must be -1 or in [0, 100)")
+    if background_sigma < 0:
+        raise ValueError("volume_background_sigma must be non-negative")
+
+    if background_percentile >= 0:
+        baseline = np.percentile(
+            volume, float(background_percentile), axis=(1, 2)
+        ).astype(np.float32)
+        if background_sigma > 0:
+            baseline = gaussian_filter1d(
+                baseline, float(background_sigma), mode="nearest"
+            )
+        volume -= baseline[:, None, None]
+
+    volume = np.nan_to_num(volume, nan=0.0, posinf=0.0, neginf=0.0)
+    return volume
+
+
 def save_split(output, name, indices, projections, angles):
     directory = output / name
     directory.mkdir(parents=True, exist_ok=True)
@@ -138,6 +181,7 @@ def main(args):
         [process_projection(tifffile.imread(path), args) for path in paths], axis=0
     )
     angles = build_angles(args, len(projections_all))
+    projections_all, angles = sort_views_by_angles(projections_all, angles)
     config_values = parse_config(args.config)
     angle_interval = float(config_values.get("AngleInterval", args.angle_interval))
     removed_endpoint = (
@@ -162,9 +206,22 @@ def main(args):
     geo = build_parallel_geometry(args, projections.shape[1:])
     volume_tigre = algs.fbp(projections[:, ::-1, :], geo, angles)
     volume_raw = np.transpose(volume_tigre, (2, 1, 0)).astype(np.float32)
+    expected_shape = tuple(int(size) for size in args.nVoxel)
+    if volume_raw.shape != expected_shape:
+        raise ValueError(
+            f"FBP volume shape {volume_raw.shape} does not match nVoxel {expected_shape}"
+        )
     volume_raw = np.nan_to_num(volume_raw, nan=0.0, posinf=0.0, neginf=0.0)
-    volume = np.clip(volume_raw, 0.0, None)
+    volume_adjusted = adjust_fbp_volume(
+        volume_raw,
+        args.volume_sign,
+        args.volume_background_percentile,
+        args.volume_background_sigma,
+    )
+    volume = np.clip(volume_adjusted, 0.0, None)
+    # Keep the documented raw reconstruction untouched for diagnostics.
     np.save(output / "vol_fbp_raw.npy", volume_raw)
+    np.save(output / "vol_fbp_adjusted.npy", volume_adjusted)
     np.save(output / "vol_fbp.npy", volume)
     preview_low, preview_high = save_fbp_preview(
         output,
@@ -229,6 +286,11 @@ def main(args):
             "input_pixel_size": float(args.pixel_size),
             "effective_pixel_size": float(args.pixel_size * args.pixel_subsample),
             "projection_scale": float(args.projection_scale),
+            "volume_sign": args.volume_sign,
+            "volume_background_percentile": float(args.volume_background_percentile),
+            "volume_background_sigma": float(args.volume_background_sigma),
+            "raw_reconstruction": "vol_fbp_raw.npy",
+            "adjusted_reconstruction": "vol_fbp_adjusted.npy",
             "endpoint_pair": "proj_endpoint_pair.npy" if endpoint_pair is not None else None,
             "center_json": str(args.center_json.resolve()) if args.center_json else None,
         },
@@ -288,6 +350,24 @@ if __name__ == "__main__":
     parser.add_argument("--pixel_subsample", type=int, default=1)
     parser.add_argument("--resize_order", type=int, choices=[0, 1, 3], default=1)
     parser.add_argument("--projection_scale", type=float, default=1.0)
+    parser.add_argument(
+        "--volume_sign",
+        choices=["auto", "positive", "negative"],
+        default="auto",
+        help="Sign correction after FBP; auto flips an entirely negative volume.",
+    )
+    parser.add_argument(
+        "--volume_background_percentile",
+        type=float,
+        default=-1.0,
+        help="Per-axial-slice baseline percentile; -1 disables correction.",
+    )
+    parser.add_argument(
+        "--volume_background_sigma",
+        type=float,
+        default=8.0,
+        help="Gaussian smoothing sigma for the axial baseline.",
+    )
     parser.add_argument("--n_train", type=int, default=50)
     parser.add_argument("--n_test", type=int, default=100)
     parser.add_argument("--nVoxel", nargs=3, type=int, default=[128, 128, 128])

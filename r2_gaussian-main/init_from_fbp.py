@@ -75,7 +75,12 @@ def main():
     parser.add_argument(
         "--visualize",
         action="store_true",
-        help="Show a 3D scatter plot of the initialized FBP point cloud.",
+        help="Save a 3D scatter preview of the initialized FBP point cloud.",
+    )
+    parser.add_argument(
+        "--visualize_show",
+        action="store_true",
+        help="Open the preview window after saving it (for desktop use only).",
     )
     parser.add_argument(
         "--visualize_output",
@@ -144,6 +149,7 @@ def main():
             preview_output,
             args.visualize_max_points,
             args.seed,
+            show=args.visualize_show,
         )
 
 

@@ -13,7 +13,12 @@ import tifffile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts.fbp_preprocess import build_angles, process_projection, sort_projection_paths
+from scripts.fbp_preprocess import (
+    build_angles,
+    process_projection,
+    sort_projection_paths,
+    sort_views_by_angles,
+)
 
 
 def parse_args():
@@ -90,6 +95,7 @@ def main(args):
     raw = [tifffile.imread(path) for path in paths]
     processed_all = np.stack([process_projection(image, args) for image in raw], axis=0)
     angles = build_angles(args, len(processed_all))
+    processed_all, angles = sort_views_by_angles(processed_all, angles)
     if len(angles) < 2:
         raise ValueError("At least two projection angles are required")
     projections = processed_all[: len(angles)]

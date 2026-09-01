@@ -30,6 +30,18 @@ def sort_projection_paths(paths):
     return sorted(paths, key=key)
 
 
+def sort_views_by_angles(projections, angles):
+    """Return projections and angles in increasing angular order."""
+    projections = np.asarray(projections)
+    angles = np.asarray(angles)
+    if projections.shape[0] != angles.shape[0]:
+        raise ValueError(
+            f"Projection/angle count mismatch: {projections.shape[0]} vs {angles.shape[0]}"
+        )
+    order = np.argsort(angles, kind="stable")
+    return projections[order], angles[order]
+
+
 def build_angles(args, n_views):
     angles_file = getattr(args, "angles_file", None)
     if angles_file:
