@@ -1,0 +1,7 @@
+ProjectName=SiO2
+GeometryType=ParallelBeam
+DetectorType=EID
+NumberImages=181
+AngleInterval=1
+AngleFirst=0
+AngleLast=180
