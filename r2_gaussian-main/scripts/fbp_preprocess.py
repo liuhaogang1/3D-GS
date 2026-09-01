@@ -22,6 +22,12 @@ def parse_config(path):
 
 def sort_projection_paths(paths):
     """Sort projection files by their numeric suffix (not lexicographically)."""
+    # Acquisition folders often keep flat-field frames next to projections.
+    # They are not angular views and must not enter the sinogram.
+    paths = [
+        path for path in paths if not Path(path).stem.lower().startswith("flat")
+    ]
+
     def key(path):
         stem = Path(path).stem
         digits = "".join(character for character in reversed(stem) if character.isdigit())
