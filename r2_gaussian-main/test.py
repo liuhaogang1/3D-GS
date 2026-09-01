@@ -142,13 +142,13 @@ def evaluate_volume(
         float(size) / float(count)
         for size, count in zip(scanner_cfg["sVoxel"], scanner_cfg["nVoxel"])
     )
-    gt_image = sitk.GetImageFromArray(t2a(vol_gt).transpose(2, 0, 1))
+    gt_image = sitk.GetImageFromArray(t2a(vol_gt).transpose(2, 1, 0))
     gt_image.SetSpacing(voxel_spacing)
     sitk.WriteImage(
         gt_image,
         os.path.join(save_path, "vol_gt.nii.gz"),
     )
-    pred_image = sitk.GetImageFromArray(t2a(vol_pred).transpose(2, 0, 1))
+    pred_image = sitk.GetImageFromArray(t2a(vol_pred).transpose(2, 1, 0))
     pred_image.SetSpacing(voxel_spacing)
     sitk.WriteImage(
         pred_image,

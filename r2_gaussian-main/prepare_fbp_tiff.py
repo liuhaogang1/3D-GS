@@ -50,8 +50,9 @@ def save_fbp_preview(output, volume, s_voxel, preview_percentiles=(1.0, 99.5)):
             output / f"vol_fbp_preview_{axis}.png"
         )
 
-    # Keep the full dynamic range for Slicer; PNGs are only for quick viewing.
-    preview_image = sitk.GetImageFromArray(volume.transpose(2, 0, 1))
+    # The NIfTI contains the same normalized volume as vol_fbp.npy; PNGs are
+    # only for quick viewing.
+    preview_image = sitk.GetImageFromArray(volume.transpose(2, 1, 0))
     spacing = tuple(float(size) / float(count) for size, count in zip(s_voxel, volume.shape))
     preview_image.SetSpacing(spacing)
     sitk.WriteImage(preview_image, str(output / "vol_fbp_preview.nii.gz"))
@@ -128,6 +129,23 @@ def adjust_fbp_volume(volume_raw, sign_mode, background_percentile, background_s
 
     volume = np.nan_to_num(volume, nan=0.0, posinf=0.0, neginf=0.0)
     return volume
+
+
+def normalize_fbp_volume(volume_adjusted, percentile):
+    """Clip corrected FBP values and optionally scale them to the [0, 1] range."""
+    volume = np.clip(np.asarray(volume_adjusted, dtype=np.float32), 0.0, None)
+    if percentile <= 0:
+        return volume, None
+    if percentile > 100:
+        raise ValueError("volume_normalize_percentile must be 0 or in (0, 100]")
+
+    positive = volume[np.isfinite(volume) & (volume > 0)]
+    if positive.size == 0:
+        raise ValueError("FBP volume contains no positive voxels for normalization")
+    scale = float(np.percentile(positive, percentile))
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError("Invalid FBP volume normalization scale")
+    return np.clip(volume / scale, 0.0, 1.0).astype(np.float32), scale
 
 
 def save_split(output, name, indices, projections, angles):
@@ -221,7 +239,9 @@ def main(args):
         args.volume_background_percentile,
         args.volume_background_sigma,
     )
-    volume = np.clip(volume_adjusted, 0.0, None)
+    volume, volume_normalize_scale = normalize_fbp_volume(
+        volume_adjusted, args.volume_normalize_percentile
+    )
     # Keep the documented raw reconstruction untouched for diagnostics.
     np.save(output / "vol_fbp_raw.npy", volume_raw)
     np.save(output / "vol_fbp_adjusted.npy", volume_adjusted)
@@ -292,8 +312,15 @@ def main(args):
             "volume_sign": args.volume_sign,
             "volume_background_percentile": float(args.volume_background_percentile),
             "volume_background_sigma": float(args.volume_background_sigma),
+            "volume_normalize_percentile": (
+                float(args.volume_normalize_percentile)
+                if args.volume_normalize_percentile > 0
+                else None
+            ),
+            "volume_normalize_scale": volume_normalize_scale,
             "raw_reconstruction": "vol_fbp_raw.npy",
             "adjusted_reconstruction": "vol_fbp_adjusted.npy",
+            "normalized_reconstruction": "vol_fbp.npy",
             "endpoint_pair": "proj_endpoint_pair.npy" if endpoint_pair is not None else None,
             "center_json": str(args.center_json.resolve()) if args.center_json else None,
         },
@@ -370,6 +397,12 @@ if __name__ == "__main__":
         type=float,
         default=8.0,
         help="Gaussian smoothing sigma for the axial baseline.",
+    )
+    parser.add_argument(
+        "--volume_normalize_percentile",
+        type=float,
+        default=99.5,
+        help="Normalize positive FBP voxels by this percentile; 0 disables normalization.",
     )
     parser.add_argument("--n_train", type=int, default=50)
     parser.add_argument("--n_test", type=int, default=100)
