@@ -94,15 +94,28 @@ def main(args):
 
     raw = [tifffile.imread(path) for path in paths]
     processed_all = np.stack([process_projection(image, args) for image in raw], axis=0)
-    angles = build_angles(args, len(processed_all))
-    processed_all, angles = sort_views_by_angles(processed_all, angles)
+    # Keep the duplicate 180-degree endpoint while sorting so projection and
+    # angle arrays have the same length.  Remove it only after sorting; VO
+    # uses the endpoint pair, while the unique-angle sinogram does not.
+    angles_all = build_angles(
+        args, len(processed_all), drop_duplicate_endpoint=False
+    )
+    processed_all, angles_all = sort_views_by_angles(processed_all, angles_all)
+    removed_endpoint = (
+        not args.keep_duplicate_endpoint
+        and len(angles_all) > 1
+        and np.isclose(
+            np.rad2deg(angles_all[-1] - angles_all[0]), 180.0, atol=1e-3
+        )
+    )
+    angles = angles_all[:-1] if removed_endpoint else angles_all
     if len(angles) < 2:
         raise ValueError("At least two projection angles are required")
     projections = processed_all[: len(angles)]
 
     # VO needs the actual 0/180 pair. TIGRE FBP will use only unique views.
     vo_projections = projections
-    if args.method == "vo" and len(processed_all) == len(angles) + 1:
+    if args.method == "vo" and removed_endpoint:
         vo_projections = processed_all
         print("Using the original 180-degree endpoint for find_center_vo.")
 

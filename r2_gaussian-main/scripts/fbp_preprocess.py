@@ -48,7 +48,7 @@ def sort_views_by_angles(projections, angles):
     return projections[order], angles[order]
 
 
-def build_angles(args, n_views):
+def build_angles(args, n_views, drop_duplicate_endpoint=True):
     angles_file = getattr(args, "angles_file", None)
     if angles_file:
         angles_path = Path(angles_file)
@@ -71,7 +71,8 @@ def build_angles(args, n_views):
 
     angles_deg = start + np.arange(n_views, dtype=np.float32) * interval
     if (
-        not args.keep_duplicate_endpoint
+        drop_duplicate_endpoint
+        and not args.keep_duplicate_endpoint
         and len(angles_deg) > 1
         and np.isclose(angles_deg[-1] - angles_deg[0], 180.0, atol=1e-4)
     ):

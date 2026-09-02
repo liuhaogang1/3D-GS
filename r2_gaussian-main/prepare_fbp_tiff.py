@@ -201,16 +201,26 @@ def main(args):
     projections_all = np.stack(
         [process_projection(tifffile.imread(path), args) for path in paths], axis=0
     )
-    angles = build_angles(args, len(projections_all))
-    projections_all, angles = sort_views_by_angles(projections_all, angles)
+    # Sort with the full projection/angle arrays first.  The 181st view is a
+    # duplicate 180-degree endpoint and is removed only after sorting.
+    angles_all = build_angles(
+        args, len(projections_all), drop_duplicate_endpoint=False
+    )
+    projections_all, angles_all = sort_views_by_angles(projections_all, angles_all)
+    angles = angles_all
     config_values = parse_config(args.config)
     angle_interval = float(config_values.get("AngleInterval", args.angle_interval))
     removed_endpoint = (
         not args.keep_duplicate_endpoint
-        and len(paths) == len(angles) + 1
-        and np.isclose(angle_interval * len(angles), 180.0, atol=1e-3)
+        and len(paths) == len(angles_all)
+        and len(angles_all) > 1
+        and np.isclose(
+            np.rad2deg(angles_all[-1] - angles_all[0]), 180.0, atol=1e-3
+        )
     )
     endpoint_pair = projections_all[[0, -1]].copy() if removed_endpoint else None
+    if removed_endpoint:
+        angles = angles_all[:-1]
     projections = projections_all[: len(angles)]
     if len(angles) < 2:
         raise ValueError("At least two projection angles are required")
