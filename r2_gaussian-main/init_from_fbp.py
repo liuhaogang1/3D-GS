@@ -6,6 +6,55 @@ from pathlib import Path
 import numpy as np
 
 
+def save_initialization_slices(
+    volume_shape: tuple[int, int, int],
+    selected: np.ndarray,
+    densities: np.ndarray,
+    output: Path,
+    positions=(0.25, 0.5, 0.75),
+) -> None:
+    """Save X/Y/Z slices of the selected initialization voxels."""
+    import matplotlib.pyplot as plt
+
+    # Reconstruct only the voxels that survive thresholding and random sampling.
+    volume = np.zeros(volume_shape, dtype=np.float32)
+    volume[tuple(np.asarray(selected, dtype=np.int64).T)] = np.asarray(
+        densities, dtype=np.float32
+    )
+    positive = volume[volume > 0]
+    vmax = float(np.percentile(positive, 99.5)) if positive.size else 1.0
+    vmax = max(vmax, 1e-6)
+    axes = (0, 1, 2)
+    axis_names = ("X", "Y", "Z")
+    indices = [
+        [round(position * (volume.shape[axis] - 1)) for position in positions]
+        for axis in axes
+    ]
+
+    figure, panels = plt.subplots(3, len(positions), figsize=(4 * len(positions), 10))
+    if len(positions) == 1:
+        panels = panels[:, None]
+    figure.suptitle("FBP initialization volume slices", fontsize=15)
+    for row, (axis, axis_name) in enumerate(zip(axes, axis_names)):
+        for col, index in enumerate(indices[row]):
+            panel = panels[row, col]
+            panel.imshow(
+                np.take(volume, index, axis=axis).T,
+                cmap="gray",
+                vmin=0.0,
+                vmax=vmax,
+                interpolation="nearest",
+            )
+            panel.set_title(f"{axis_name} {index}", fontsize=10)
+            panel.set_xticks([])
+            panel.set_yticks([])
+    figure.tight_layout()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(output, dpi=220, bbox_inches="tight")
+    plt.close(figure)
+    print(f"Saved initialization slices to {output}")
+
+
 def visualize_initial_point_cloud(
     point_cloud: np.ndarray,
     output: Path,
@@ -94,6 +143,17 @@ def main():
         default=50000,
         help="Maximum points in the preview; 0 keeps all points.",
     )
+    parser.add_argument(
+        "--visualize_slices",
+        action="store_true",
+        help="Save slices of the FBP volume used for initialization.",
+    )
+    parser.add_argument(
+        "--visualize_slice_output",
+        type=Path,
+        default=None,
+        help="Slice image path. Defaults to <output_stem>_slices.png.",
+    )
     args = parser.parse_args()
 
     volume = np.load(args.volume).astype(np.float32)
@@ -152,6 +212,11 @@ def main():
             show=args.visualize_show,
         )
 
+    if args.visualize_slices:
+        slice_output = args.visualize_slice_output
+        if slice_output is None:
+            slice_output = output.with_name(output.stem + "_slices.png")
+        save_initialization_slices(volume.shape, selected, densities, slice_output)
 
 if __name__ == "__main__":
     main()
